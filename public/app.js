@@ -17,6 +17,8 @@ const status = document.getElementById('status');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
 const transcript = document.getElementById('transcript');
+const ttsInput = document.getElementById('ttsInput');
+const testTtsBtn = document.getElementById('testTtsBtn');
 
 startBtn.onclick = async () => {
     socket = new WebSocket(`ws://${window.location.host}/ws`);
@@ -28,7 +30,30 @@ startBtn.onclick = async () => {
         startRecording();
     };
 
-    socket.onmessage = (event) => {
+    socket.onmessage = async (event) => {
+        // If the server sends us a Blob (Binary), it's Text-to-Speech audio!
+        if (event.data instanceof Blob) {
+            try {
+                status.innerText = "Status: Playing Audio...";
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                }
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+                const arrayBuffer = await event.data.arrayBuffer();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start(0);
+            } catch (err) {
+                console.error("Error decoding TTS audio:", err);
+            }
+            return;
+        }
+
+        // Otherwise, it's our transcribed text from Whisper
         status.innerText = "Status: Connected - Listening...";
         if (!event.data.trim()) return; // Ignore empty text
         
@@ -48,6 +73,14 @@ stopBtn.onclick = () => {
     socket.close();
     startBtn.disabled = false;
     stopBtn.disabled = true;
+};
+
+testTtsBtn.onclick = () => {
+    if (socket && socket.readyState === WebSocket.OPEN && ttsInput.value) {
+        // Send raw text to the server to trigger the TTS pipeline
+        socket.send(ttsInput.value);
+        ttsInput.value = '';
+    }
 };
 
 async function startRecording() {

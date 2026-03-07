@@ -9,13 +9,17 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	//"net/url"
 
 	"github.com/gorilla/websocket"
+	"os/exec"
 	"strings"
 )
 
 const (
 	whisperURL    = "http://localhost:8081/inference"
+	piperBin      = "./piper/piper"                     // Path to the piper executable
+	piperModel    = "./piper/en_GB-cori-medium.onnx" // Path to the voice model
 	sampleRate    = 16000
 )
 
@@ -39,6 +43,20 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Handle incoming text (TTS Request)
+		if messageType == websocket.TextMessage {
+			text := string(p)
+			go func(t string) {
+				audioBytes, err := queryTTS(t)
+				if err != nil {
+					log.Println("TTS error:", err)
+					return
+				}
+				ws.WriteMessage(websocket.BinaryMessage, audioBytes)
+			}(text)
+		}
+
+		// Handle incoming audio (STT Request)
 		if messageType == websocket.BinaryMessage {
 			// Minimum byte length check (~0.5 seconds of 16-bit PCM is 16000 bytes)
 			if len(p) < 16000 {
@@ -118,6 +136,26 @@ func queryWhisper(audioData []byte) (string, error) {
 		return "", err
 	}
 	return result.Text, nil
+}
+
+func queryTTS(text string) ([]byte, error) {
+	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
+	cmd := exec.Command(piperBin, "--model", piperModel, "-f", "-")
+	
+	// Feed our text into Piper's standard input
+	cmd.Stdin = strings.NewReader(text)
+	
+	// Capture the raw WAV audio from Piper's standard output
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("piper execution failed: %v, stderr: %s", err, stderr.String())
+	}
+
+	return out.Bytes(), nil
 }
 
 func main() {
