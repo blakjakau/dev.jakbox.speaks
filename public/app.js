@@ -1,5 +1,6 @@
 let socket;
-let audioContext;
+let outContext;
+let inContext;
 let processor;
 let input;
 
@@ -12,16 +13,32 @@ let preRollBuffer = [];
 let isSpeaking = false;
 let silenceFrames = 0;
 let wakeLock = null;
+let reconnectDelay = 1000;
+const MAX_RECONNECT_DELAY = 5000;
+let isDictationActive = false;
 
 const NOISE_THRESHOLD = 0.015; // RMS threshold. Increase if your room is noisy!
 const SILENCE_FRAMES_LIMIT = 6; // ~0.75 seconds of trailing silence to stop
 const PRE_ROLL_FRAMES = 2; // ~0.5 seconds of audio to keep BEFORE speech is detected
 const MIN_CHUNKS = 2; // Require at least ~0.5 seconds of audio to bother sending
 
+// Get or create a persistent Client UUID
+let clientId = localStorage.getItem('speax_client_id');
+if (!clientId || clientId === 'default') {
+    try {
+        clientId = crypto.randomUUID();
+    } catch (e) {
+        // Fallback for local network testing where crypto.randomUUID is undefined/blocked
+        clientId = 'client-' + Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+    }
+    localStorage.setItem('speax_client_id', clientId);
+}
+
 const status = document.getElementById('status');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
 const transcript = document.getElementById('transcript');
+const resetBtn = document.getElementById('resetSession');
 
 async function requestWakeLock() {
     try {
@@ -49,14 +66,24 @@ document.addEventListener('visibilitychange', async () => {
 });
 
 startBtn.onclick = async () => {
-    socket = new WebSocket(`wss://${window.location.host}/ws`);
+    isDictationActive = true;
+    reconnectDelay = 1000;
+    connectWebSocket();
+};
+
+function connectWebSocket() {
+    if (!isDictationActive) return;
+    status.innerText = "Status: Connecting...";
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    socket = new WebSocket(`${protocol}//${window.location.host}/ws?client_id=${clientId}`);
     
     socket.onopen = () => {
         status.innerText = "Status: Connected - Listening...";
         startBtn.disabled = true;
         stopBtn.disabled = false;
+        reconnectDelay = 1000; // Reset delay on successful connection
         requestWakeLock();
-        startRecording();
+        if (!processor) startRecording(); // Only start audio if not already running
     };
 
     socket.onmessage = async (event) => {
@@ -82,11 +109,17 @@ startBtn.onclick = async () => {
         } else if (text === "[AI_END]") {
             currentAiDiv = null;
             return;
+        } else if (text === "[IGNORED]") {
+            if (outContext && outContext.state === 'suspended') {
+                outContext.resume();
+            }
+            return;
         }
 
         if (currentAiDiv) {
             currentAiDiv.innerText += rawText; // keep the spaces!
         } else if (text) {
+            stopAudio(); // Abort the paused audio because we have valid STT
             const msg = document.createElement('div');
             msg.innerText = `> ${text}`;
             transcript.appendChild(msg);
@@ -98,14 +131,30 @@ startBtn.onclick = async () => {
         status.innerText = "Status: Disconnected";
         stopRecording();
         releaseWakeLock();
+        
+        if (isDictationActive) {
+            status.innerText = `Status: Reconnecting in ${reconnectDelay / 1000}s...`;
+            setTimeout(connectWebSocket, reconnectDelay);
+            reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+        } else {
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+        }
     };
-};
+}
 
 stopBtn.onclick = () => {
-    socket.close();
+    isDictationActive = false; // Prevent auto-reconnect
+    if (socket && socket.readyState === WebSocket.OPEN) socket.close();
     startBtn.disabled = false;
     stopBtn.disabled = true;
     releaseWakeLock();
+    stopRecording();
+};
+
+resetBtn.onclick = () => {
+    localStorage.removeItem('speax_client_id');
+    window.location.reload();
 };
 
 async function playNextAudio() {
@@ -118,17 +167,17 @@ async function playNextAudio() {
     isPlayingAudio = true;
     status.innerText = "Status: Playing Audio...";
     
-    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    if (audioContext.state === 'suspended') await audioContext.resume();
+    if (!outContext) outContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    if (outContext.state === 'suspended') await outContext.resume();
 
     try {
         const blob = audioQueue.shift();
         const arrayBuffer = await blob.arrayBuffer();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-        const source = audioContext.createBufferSource();
+        const audioBuffer = await outContext.decodeAudioData(arrayBuffer);
+        const source = outContext.createBufferSource();
         currentAudioSource = source;
         source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
+        source.connect(outContext.destination);
         source.onended = () => {
             currentAudioSource = null;
             playNextAudio();
@@ -147,20 +196,23 @@ function stopAudio() {
         currentAudioSource = null;
         isPlayingAudio = false;
     }
+    if (outContext && outContext.state === 'suspended') {
+        outContext.resume(); // Ensure it isn't locked up for the new response
+    }
 }
 
 async function startRecording() {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    inContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     
-    if (audioContext.state === 'suspended') {
-        await audioContext.resume();
+    if (inContext.state === 'suspended') {
+        await inContext.resume();
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    input = audioContext.createMediaStreamSource(stream);
+    input = inContext.createMediaStreamSource(stream);
     
     // Using ScriptProcessor for simplicity in this MVP; AudioWorklet is preferred for production
-    processor = audioContext.createScriptProcessor(4096, 1, 1);
+    processor = inContext.createScriptProcessor(4096, 1, 1);
 
     processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
@@ -175,9 +227,8 @@ async function startRecording() {
         if (rms > NOISE_THRESHOLD) {
             // Speech detected
             if (!isSpeaking) {
-                stopAudio(); // Instantly mute the AI
-                if (socket && socket.readyState === WebSocket.OPEN) {
-                    socket.send("[INTERRUPT]"); // Tell the server to kill the generation
+                if (outContext && outContext.state === 'running') {
+                    outContext.suspend(); // PAUSE audio, don't destroy it yet
                 }
                 status.innerText = "Status: Recording (Speaking)...";
                 isSpeaking = true;
@@ -215,11 +266,14 @@ async function startRecording() {
     };
 
     input.connect(processor);
-    processor.connect(audioContext.destination);
+    processor.connect(inContext.destination);
 }
 
 function sendAndClearBuffer() {
-    if (socket.readyState !== WebSocket.OPEN) return;
+    if (socket.readyState !== WebSocket.OPEN) {
+        audioChunks = []; // Don't hoard memory if socket is dead
+        return;
+    }
     
     const totalLength = audioChunks.reduce((acc, val) => acc + val.length, 0);
     const pcmData = new Int16Array(totalLength);
@@ -235,7 +289,12 @@ function sendAndClearBuffer() {
 }
 
 function stopRecording() {
+    if (input && input.mediaStream) {
+        input.mediaStream.getTracks().forEach(track => track.stop());
+    }
     if (input) input.disconnect();
     if (processor) processor.disconnect();
-    if (audioContext) audioContext.close();
+    if (inContext && inContext.state !== 'closed') {
+        inContext.close();
+    }
 }

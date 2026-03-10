@@ -10,12 +10,15 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"os"
+	"path/filepath"
 	//"net/url"
 
 	"github.com/gorilla/websocket"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -25,10 +28,15 @@ const (
 	//en_GB-cori-medium.onnx
 	//en_GB-southern_english_female-low.onnx
 	sampleRate    = 16000
-	ollamaURL     = "http://localhost:11434/api/generate"
-	ollamaChatURL = "http://localhost:11434/api/chat"
-	ollamaModel   = "gemma3n:e2b" // Change this if you pulled a different model!
 	
+	// ollamaURL     = "http://localhost:11434/api/generate"
+	// ollamaChatURL = "http://localhost:11434/api/chat"
+	// ollamaModel   = "gemma3n:e2b" // Change this if you pulled a different model!
+
+	ollamaURL     = "http://192.168.1.21:11434/api/generate"
+	ollamaChatURL = "http://192.168.1.21:11434/api/chat"
+	ollamaModel   = "llama3.2:3b" // Change this if you pulled a different model!
+	// mistral-nemo:12b
 	// gemma3n:e2b
 	// gemma3:1b-it-qat
 	// gemma3:4b-it-qat
@@ -40,10 +48,43 @@ type ChatMessage struct {
 }
 
 type ClientSession struct {
-	History []ChatMessage
-	Archive []ChatMessage
-	Summary string
-	Mutex   sync.Mutex
+	ClientID string        `json:"-"`
+	History  []ChatMessage `json:"history"`
+	Archive  []ChatMessage `json:"archive"`
+	Summary  string        `json:"summary"`
+	Mutex    sync.Mutex    `json:"-"`
+	ConnMutex sync.Mutex   `json:"-"` // Dedicated lock for WebSocket writes
+}
+
+func safeWrite(ws *websocket.Conn, session *ClientSession, msgType int, data []byte) error {
+	session.ConnMutex.Lock()
+	defer session.ConnMutex.Unlock()
+	return ws.WriteMessage(msgType, data)
+}
+
+func getContextPath(clientID string) string {
+	safeID := strings.ReplaceAll(clientID, "/", "")
+	safeID = strings.ReplaceAll(safeID, "\\", "")
+	safeID = strings.ReplaceAll(safeID, "..", "")
+	return filepath.Join(".", "context", safeID+".json")
+}
+
+func loadSession(clientID string) *ClientSession {
+	session := &ClientSession{ClientID: clientID}
+	data, err := os.ReadFile(getContextPath(clientID))
+	if err == nil {
+		json.Unmarshal(data, session)
+	}
+	return session
+}
+
+func saveSession(session *ClientSession) {
+	session.Mutex.Lock()
+	defer session.Mutex.Unlock()
+	if data, err := json.MarshalIndent(session, "", "  "); err == nil {
+		os.MkdirAll(filepath.Join(".", "context"), 0755)
+		os.WriteFile(getContextPath(session.ClientID), data, 0644)
+	}
 }
 
 var upgrader = websocket.Upgrader{
@@ -58,9 +99,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 
-	fmt.Println("Client connected!")
-
-	session := &ClientSession{}
+	clientID := r.URL.Query().Get("client_id")
+	if clientID == "" {
+		clientID = "default"
+	}
+	fmt.Printf("Client connected: %s\n", clientID)
+	session := loadSession(clientID)
 	var activeCancel context.CancelFunc
 
 	for {
@@ -87,7 +131,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					log.Println("TTS error:", err)
 					return
 				}
-				ws.WriteMessage(websocket.BinaryMessage, audioBytes)
+				safeWrite(ws, session, websocket.BinaryMessage, audioBytes)
 			}(text)
 		}
 
@@ -98,14 +142,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			if activeCancel != nil {
-				activeCancel()
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			activeCancel = cancel
-
 			// Process the complete phrase sent by the client
-			go func(audio []byte, reqCtx context.Context) {
+			go func(audio []byte) {
 				text, err := queryWhisper(audio)
 				if err != nil {
 					log.Println("Whisper error:", err)
@@ -117,19 +155,30 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				text = strings.TrimSpace(text)
 
 				if text != "" {
+					session.Mutex.Lock()
+					if activeCancel != nil {
+						activeCancel()
+					}
+					ctx, cancel := context.WithCancel(context.Background())
+					activeCancel = cancel
+					session.Mutex.Unlock()
+
 					// 1. Send the user's transcription to the browser
-					if err := ws.WriteMessage(websocket.TextMessage, []byte(text)); err != nil {
+					if err := safeWrite(ws, session, websocket.TextMessage, []byte(text)); err != nil {
 						log.Println("Write error:", err)
 					}
 
 					// 2. Stream Ollama and TTS responses to the browser
-					ws.WriteMessage(websocket.TextMessage, []byte("[AI_START]"))
-					if err := streamOllamaAndTTS(reqCtx, text, ws, session); err != nil {
+					safeWrite(ws, session, websocket.TextMessage, []byte("[AI_START]"))
+					if err := streamOllamaAndTTS(ctx, text, ws, session); err != nil {
 						log.Println("Ollama stream error:", err)
 					}
-					ws.WriteMessage(websocket.TextMessage, []byte("[AI_END]"))
+					safeWrite(ws, session, websocket.TextMessage, []byte("[AI_END]"))
+				} else {
+					// Inform the frontend that the audio was ignored (e.g., background noise)
+					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
 				}
-			}(p, ctx)
+			}(p)
 		}
 	}
 }
@@ -189,8 +238,13 @@ func queryWhisper(audioData []byte) (string, error) {
 
 func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
 	session.Mutex.Lock()
-	sysContent := "You are 'Alex' a highly capable, voice-based AI assistant. Your output is sent directly to a Text-to-Speech engine. You MUST strictly follow these rules: 1. NEVER use emojis. 3. Keep responses conversational, concise, and easy to listen to."
-	
+	sysContent := fmt.Sprintf("You are 'Alex', a highly capable, voice-based AI programming assistant. "+
+		"You are built on a low-latency architecture: a Vanilla JS + WebAudio frontend, a Go WebSocket backend, Whisper STT for hearing, Ollama for thinking, and Piper TTS for speaking. "+
+		"You are currently thinking using the %s model and speaking using the %s voice model. "+
+		"Your output is sent directly to a Text-to-Speech engine. "+
+		"You MUST strictly follow these rules: 1. NEVER use emojis. 2. NEVER use markdown formatting like asterisks. 3. Keep responses conversational, concise, and easy to listen to. 4. If explaining code, speak it out logically rather than printing raw syntax.",
+		ollamaModel, piperModel)
+
 	if session.Summary != "" {
 		sysContent += "\n\nContext from earlier in the conversation: " + session.Summary
 	}
@@ -225,6 +279,28 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	var sentence strings.Builder
 	var fullResponse strings.Builder
 
+	// Setup an asynchronous TTS Worker so Ollama tokens aren't blocked by audio generation
+	ttsChan := make(chan string, 50)
+	var ttsBusy atomic.Bool
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for text := range ttsChan {
+			if ctx.Err() != nil {
+				return // Abort if interrupted
+			}
+			ttsBusy.Store(true) // Mark Piper as busy
+			if audioBytes, err := queryTTS(text); err == nil {
+				if ctx.Err() == nil {
+					safeWrite(ws, session, websocket.BinaryMessage, audioBytes)
+				}
+			}
+			ttsBusy.Store(false) // Mark Piper as idle
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -245,31 +321,37 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		content := result.Message.Content
 
 		// Stream text token directly to UI
-		ws.WriteMessage(websocket.TextMessage, []byte(content))
+		safeWrite(ws, session, websocket.TextMessage, []byte(content))
 
 		// Buffer token for TTS processing
 		sentence.WriteString(content)
 		fullResponse.WriteString(content)
 		
-		// Trigger TTS on paragraph breaks (newlines), or if it's done.
-		// Fallback: Also trigger on sentence boundaries IF the paragraph is getting extremely long (>250 chars) to prevent huge latency spikes.
-		isNewline := strings.Contains(content, "\n")
-		isLongSentenceBoundary := sentence.Len() > 250 && strings.ContainsAny(content, ".!?")
+		cleanChunk := strings.TrimSpace(sentence.String())
+		isSentenceBoundary := strings.ContainsAny(content, ".!?:")
+		isParagraphBoundary := strings.Contains(content, "\n")
 
-		if isNewline || isLongSentenceBoundary || result.Done {
-			cleanChunk := strings.TrimSpace(sentence.String())
-			if len(cleanChunk) > 0 {
+		// DYNAMIC CHUNKING LOGIC:
+		// 1. Always flush on paragraph end or generation end.
+		// 2. If it's a sentence end, ONLY flush if Piper is idle (gives fast TTFA).
+		// 3. Fallback: Flush if the buffer is getting too large (>250 chars).
+		shouldFlush := result.Done || 
+			isParagraphBoundary || 
+			(isSentenceBoundary && !ttsBusy.Load()) || 
+			(isSentenceBoundary && len(cleanChunk) > 250)
+
+		if shouldFlush && len(cleanChunk) > 0 {
 				// Strip markdown punctuation so Piper doesn't read it aloud
 				ttsText := cleanChunk
-				ttsText = strings.ReplaceAll(ttsText, ":**", ".")
+				ttsText = strings.ReplaceAll(ttsText, "**", "")
 				ttsText = strings.ReplaceAll(ttsText, "*", "")
 				ttsText = strings.ReplaceAll(ttsText, "#", "")
 				ttsText = strings.ReplaceAll(ttsText, "_", "")
 				ttsText = strings.ReplaceAll(ttsText, "`", "")
 				
-				if audioBytes, err := queryTTS(ttsText); err == nil {
-					ws.WriteMessage(websocket.BinaryMessage, audioBytes)
-				}
+			select {
+			case ttsChan <- ttsText: // Ship to background worker
+			case <-ctx.Done():
 			}
 			sentence.Reset()
 		}
@@ -278,6 +360,10 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			break
 		}
 	}
+
+	// Close the channel and wait for the TTS worker to finish its last chunk
+	close(ttsChan)
+	wg.Wait()
 
 	// If not interrupted, save to history and trigger background summary if needed
 	if ctx.Err() == nil {
@@ -295,6 +381,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			go generateSummaryAsync(toSummarize, session)
 		}
 		session.Mutex.Unlock()
+		saveSession(session)
 	}
 
 	return nil
@@ -338,6 +425,7 @@ func generateSummaryAsync(messages []ChatMessage, session *ClientSession) {
 		session.Summary = strings.TrimSpace(result.Response)
 		log.Println("--- Context Memory Summarized for client ---")
 		session.Mutex.Unlock()
+		saveSession(session)
 	}
 }
 
