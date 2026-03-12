@@ -7,7 +7,7 @@
     <style>
         body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 15px; margin: 0; display: flex; flex-direction: column; max-width: 800px; margin: 0 auto; height: 100vh; height: 100dvh; box-sizing: border-box; }
         #status { color: #4ec9b0; }
-        #transcript { border: 1px solid #333; padding: 10px; flex-grow: 1; overflow-y: auto; overflow-x: hidden; margin-top: 15px; border-radius: 4px; background: #252526; scroll-behavior: smooth; white-space: pre-wrap; word-wrap: break-word; }
+        .chat-view { border: 1px solid #333; padding: 10px; flex-grow: 1; overflow-y: auto; overflow-x: hidden; border-radius: 0 4px 4px 4px; background: #252526; white-space: pre-wrap; word-wrap: break-word; margin-top: 0; }
         button { padding: 12px 20px; font-size: 16px; margin-right: 5px; margin-bottom: 10px; cursor: pointer; border: none; border-radius: 4px; background: #0e639c; color: white; }
         button:disabled { background: #4d4d4d; cursor: not-allowed; }
         .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; align-items: center; }
@@ -18,16 +18,111 @@
     </style>
 </head>
 <body>
-    <h1>Speax v1.0</h1>
-    <div id="status">Status: Disconnected</div>
-    
-    <div class="controls">
-        <button id="start">Connnect</button>
-        <button id="stop" disabled>Disconnect</button>
-        <button id="resetSession" style="background: #a31515;">New Session</button>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+        <h1 style="margin: 0;">Speax v1.0</h1>
+        <div id="userProfileContainer" style="display: none; position: relative;">
+            <img id="userAvatarBtn" src="" alt="User" style="width: 40px; height: 40px; border-radius: 50%; cursor: pointer; border: 2px solid #333; object-fit: cover;">
+            <div id="userDropdown" style="display: none; position: absolute; right: 0; top: 50px; background: #252526; border: 1px solid #333; border-radius: 4px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); flex-direction: column; min-width: 150px; z-index: 200;">
+                <button id="menuSettingsBtn" style="margin: 0; border-radius: 4px 4px 0 0; background: transparent; color: #d4d4d4; text-align: left; padding: 12px 15px; border-bottom: 1px solid #333; width: 100%; display: flex; align-items: center;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; margin-right: 8px; flex-shrink: 0;"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg> Settings</button>
+                <button id="menuLogoutBtn" style="margin: 0; border-radius: 0 0 4px 4px; background: transparent; color: #d16969; text-align: left; padding: 12px 15px; width: 100%; display: flex; align-items: center;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px; margin-right: 8px; flex-shrink: 0;"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg> Logout</button>
+            </div>
+        </div>
     </div>
 
-    <div id="transcript"></div>
+    <div id="auth-section" style="display: none; text-align: center; margin-top: 50px;">
+        <h2 style="margin-bottom: 20px;">Authentication Required</h2>
+        <button id="loginBtn" style="background: #db4437;">Login with Google</button>
+    </div>
+
+    <div id="app-section" style="display: none; flex-grow: 1; flex-direction: column; min-height: 0;">
+        <div id="status" style="margin-bottom: 15px; font-weight: bold; font-size: 1.1em;">Status: Disconnected</div>
+        
+        <!-- Dynamic Audio Progress Bar (Global) -->
+        <div id="audioProgressContainer" style="position: relative; width: 100%; height: 4px; background: #111; border-radius: 2px; margin-bottom: 15px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.8); flex-shrink: 0;">
+            <div id="audioProgressBar" style="position: absolute; left: 0; top: 0; width: 0%; height: 100%; background: linear-gradient(90deg, #0e639c, #4ec9b0); border-radius: 2px; box-shadow: 0 0 6px rgba(78,201,176,0.4);"></div>
+        </div>
+
+        <div id="view-container" style="flex-grow: 1; display: flex; flex-direction: column; overflow: hidden;">
+            <!-- Home View -->
+            <div id="view-home" class="chat-view" style="display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 4px;">
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 30px; margin: auto;">
+                    <div style="position: relative; display: flex; justify-content: center; align-items: center;">
+                        <!-- Main Toggle Button -->
+                        <button id="mainToggleBtn" style="width: 160px; height: 160px; border-radius: 50%; background: #0e639c; color: white; border: none; cursor: pointer; transition: background 0.3s, transform 0.05s, box-shadow 0.05s; display: flex; align-items: center; justify-content: center; z-index: 2; position: relative;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>
+                        </button>
+                        <!-- Floating Mute Button -->
+                        <button id="muteBtn" style="display: none; position: absolute; bottom: -10px; right: -20px; width: 83px; height: 83px; border-radius: 50%; background: #d7ba7d; color: #1e1e1e; border: 6px solid #252526; cursor: pointer; z-index: 3; align-items: center; justify-content: center; padding: 0; transition: background 0.3s, color 0.3s, transform 0.05s, box-shadow 0.05s;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>
+                        </button>
+                    </div>
+                    <!-- Pause Button -->
+                    <button id="pauseBtn" style="display: none; width: 60px; height: 60px; border-radius: 50%; background: #555; color: white; border: none; cursor: pointer; align-items: center; justify-content: center; padding: 0; transition: background 0.3s, color 0.3s;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Thread View -->
+            <div id="transcript" class="chat-view" style="display: none; border-radius: 4px;"></div>
+
+            <!-- Memory View -->
+            <div id="summary-view" class="chat-view" style="display: none; flex-direction: column; border-radius: 4px; color: #ce9178;">
+                <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-shrink: 0; width: 100%;">
+                    <button id="rebuildSummaryBtn" style="flex: 1; margin: 0; background: #0e639c; font-size: 14px; padding: 12px 10px;">Rebuild Summary</button>
+                    <button id="clearHistoryBtn" style="flex: 1; margin: 0; background: #8a2be2; font-size: 14px; padding: 12px 10px;">Expunge Memory</button>
+                </div>
+                <div id="summary-content" style="flex-grow: 1;">No summary generated yet.</div>
+            </div>
+        </div>
+
+        <!-- Bottom Navigation Tabs -->
+        <div id="bottom-tabs" style="display: flex; margin-top: 15px; background: #252526; border-radius: 8px; border: 1px solid #333; overflow: hidden; flex-shrink: 0;">
+            <button id="tab-home" style="flex: 1; margin: 0; border-radius: 0; background: #0e639c; color: white; padding: 15px 0;">Home</button>
+            <button id="tab-thread" style="flex: 1; margin: 0; border-radius: 0; background: transparent; color: #aaa; padding: 15px 0;">Thread</button>
+            <button id="tab-memory" style="flex: 1; margin: 0; border-radius: 0; background: transparent; color: #aaa; padding: 15px 0;">Memory</button>
+        </div>
+    </div>
+
+    <button id="settingsFab" style="position: fixed; bottom: 85px; right: 20px; border-radius: 50%; width: 50px; height: 50px; display: none; z-index: 100; background: #333; border: 1px solid #555; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); padding: 0; align-items: center; justify-content: center; color: white;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+    </button>
+
+    <div id="settingsSidebar" style="position: fixed; top: 0; right: -320px; width: 300px; height: 100%; background: #1e1e1e; border-left: 1px solid #333; transition: right 0.3s ease; z-index: 101; padding: 20px; box-sizing: border-box; display: flex; flex-direction: column; gap: 15px; box-shadow: -4px 0 15px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h2 style="margin: 0; color: #4ec9b0;">Settings</h2>
+            <button id="closeSettingsBtn" style="background: none; border: none; font-size: 20px; cursor: pointer; color: #d4d4d4; padding: 0; margin: 0; min-width: auto; width: auto;">✕</button>
+        </div>
+        
+        <label style="margin-top: 10px;">Your Name:</label>
+        <input type="text" id="userName" placeholder="e.g. Alex" style="padding: 10px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;">
+        
+        <label>Short Bio (Max 500 chars):</label>
+        <textarea id="userBio" maxlength="500" placeholder="e.g. I prefer concise code in Go and Vanilla JS." style="padding: 10px; background: #333; color: white; border: 1px solid #555; border-radius: 4px; resize: vertical; min-height: 60px; font-family: inherit;"></textarea>
+
+        <label style="margin-top: 10px;">AI Provider:</label>
+        <select id="aiProvider" style="padding: 10px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;">
+            <option value="ollama">Local (Ollama)</option>
+            <option value="gemini">Google Gemini</option>
+        </select>
+        
+        <div id="geminiSettings" style="display: none; flex-direction: column; gap: 5px;">
+            <label>Gemini API Key:</label>
+            <input type="password" id="geminiApiKey" placeholder="AIzaSy..." style="padding: 10px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;">
+        </div>
+        
+    <div id="modelSettings" style="display: flex; flex-direction: column; gap: 5px; margin-top: 5px;">
+        <label>Model:</label>
+        <select id="aiModel" style="padding: 10px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;"></select>
+    </div>
+    
+    <div id="voiceSettings" style="display: flex; flex-direction: column; gap: 5px; margin-top: 5px;">
+        <label>Voice:</label>
+        <select id="aiVoice" style="padding: 10px; background: #333; color: white; border: 1px solid #555; border-radius: 4px;"></select>
+    </div>
+
+        <button id="saveSettingsBtn" style="margin-top: auto; background: #4ec9b0; width: 100%; padding: 12px; border-radius: 4px; border: none; color: #1e1e1e; font-weight: bold; cursor: pointer;">Save</button>
+    </div>
 
     <script src="app.js"></script>
 </body>
