@@ -1,0 +1,23 @@
+ <svg id="speax-svg" width="300" height="300" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><style>
+        .bar-active { fill: #00D1C1; rx: 4; filter: drop-shadow(0 0 4px rgba(0, 209, 193, 0.7)); }
+        .bar-shadow { fill: rgba(74, 78, 105, 0.4); rx: 4; filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4)); }
+    </style>
+    <g id="shadow-group">
+        <rect class="bar-shadow" x="14" width="8" y="42.64945869782416" height="8.35711454053191"/>
+        <rect class="bar-shadow" x="26" width="8" y="27.60159132433881" height="28.353875023711556"/>
+        <rect class="bar-shadow" x="38" width="8" y="17.334044452884683" height="54.048876978133876"/>
+        <rect class="bar-shadow" x="50" width="8" y="22.735676826401907" height="67.76211707622389"/>
+        <rect class="bar-shadow" x="62" width="8" y="40.141844911633626" height="45.75110084461019"/>
+        <rect class="bar-shadow" x="74" width="8" y="47.46452583066599" height="21.127479642603134"/>
+        <rect class="bar-shadow" x="86" width="8" y="48.0184203734421" height="6.403816056781949"/>
+    </g>
+    <g id="active-group">
+        <rect class="bar-active" x="10" width="8" y="44.999258771285895" height="13.366224622572162"/>
+        <rect class="bar-active" x="22" width="8" y="44.67226973828398" height="27.56662742508565"/>
+        <rect class="bar-active" x="34" width="8" y="45.99326394816868" height="32.25729846155651"/>
+        <rect class="bar-active" x="46" width="8" y="38.5119962660552" height="31.38076487406321"/>
+        <rect class="bar-active" x="58" width="8" y="29.06897358020651" height="26.987267882199376"/>
+        <rect class="bar-active" x="70" width="8" y="29.93318642541041" height="22.977045346207095"/>
+        <rect class="bar-active" x="82" width="8" y="41.01527677631175" height="12.125658165448087"/>
+    </g>
+</svg>

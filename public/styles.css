@@ -1,0 +1,200 @@
+:root {
+    /* Palette */
+    --bg-grad-start: #051329; /* Deep midnight blue light */
+    --bg-grad-end: #010308;   /* Absolute blue-black abyss */
+    --slate-deep: #030B17;    /* Depressed Tracks / Shadows */
+    --slate-mid: #0B1E36;     /* Dark navy surface cards */
+    --slate-high: #152E4D;    /* Crisp navy borders & active states */
+    --teal-electric: #00D1C1; /* Accent Fills Only */
+    --teal-dim: #005A53;   /* Accent Fills Dim */
+    --blue-accent: #0E639C; /* Android Primary Accent */
+    --text-soft: rgba(255, 255, 255, 0.5); /* Inactive Text */
+    --text-bright: #FFFFFF; /* Active Text / Icons */
+    --text-inverse: #000000; /* Contrast on Teal Backgrounds */
+    --danger-bg: #8A3A3A;
+    --danger-text: #E0A6A6;
+}
+
+/* Base Styles */
+body {
+    font-family: monospace;
+    background: linear-gradient(180deg, var(--bg-grad-start) 0%, var(--bg-grad-end) 100%);
+    background-attachment: fixed;
+    color: var(--text-soft);
+    padding: 15px;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    max-width: 800px;
+    margin: 0 auto;
+    height: 100vh;
+    height: 100dvh;
+    box-sizing: border-box;
+}
+
+h1, h2 { margin: 0; color: var(--text-bright); }
+
+input, select, textarea {
+    padding: 10px;
+    background: var(--slate-mid);
+    color: var(--text-bright);
+    border: 1px solid var(--slate-high);
+    border-radius: 4px;
+    outline: none;
+    font-family: inherit;
+    box-sizing: border-box;
+}
+input::placeholder, textarea::placeholder { color: var(--slate-high); }
+
+/* Containers */
+.chat-view {
+    border: 1px solid var(--slate-high);
+    padding: 10px;
+    flex-grow: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border-radius: 0 4px 4px 4px;
+    background: var(--slate-mid);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    margin-top: 0;
+}
+.chat-view.centered {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Progress Bar */
+.progress-container {
+    position: relative; width: 100%; height: 4px; background: var(--slate-deep);
+    border-radius: 2px; margin-bottom: 15px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.5); flex-shrink: 0;
+}
+.progress-bar {
+    position: absolute; left: 0; top: 0; width: 0%; height: 100%;
+    background: linear-gradient(90deg, var(--blue-accent), var(--teal-electric));
+    border-radius: 2px; box-shadow: 0 0 6px rgba(0,209,193,0.4);
+}
+
+/* Base Buttons */
+.btn-primary {
+    padding: 12px 10px; font-size: 14px; font-weight: bold; cursor: pointer; border: none; border-radius: 4px;
+    background: var(--blue-accent); color: var(--text-bright);
+}
+.btn-primary.google { background: #db4437; color: white; }
+.btn-danger {
+    padding: 12px 10px; font-size: 14px; cursor: pointer; border: none; border-radius: 4px; font-weight: bold;
+    background: var(--danger-bg); color: var(--danger-text);
+}
+
+/* Bottom Tabs */
+.tab-container {
+    display: flex; margin-top: 15px; background: var(--slate-mid);
+    border-radius: 8px; border: 1px solid var(--slate-high); overflow: hidden; flex-shrink: 0;
+}
+.tab-btn {
+    flex: 1; margin: 0; border: none; border-radius: 0; padding: 10px 0; cursor: pointer;
+    background: transparent; color: var(--text-soft); font-size: 12px; font-weight: bold; transition: 0.2s ease;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+}
+.tab-btn.active { background: var(--slate-high); color: var(--text-bright); }
+.tab-icon { width: 24px; height: 24px; }
+
+/* Main Central Button */
+.main-toggle-btn {
+    width: 160px; height: 160px; border-radius: 50%; border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; z-index: 2; position: relative;
+    transition: background 0.3s, color 0.3s, transform 0.05s, box-shadow 0.05s;
+}
+.main-toggle-btn.disconnected { background: var(--slate-mid); color: var(--blue-accent); }
+.main-toggle-btn.processing { background: var(--slate-high); color: var(--text-bright); }
+.main-toggle-btn.listening { background: var(--blue-accent); color: var(--text-bright); }
+
+/* Satellite Buttons (Mute / Pause) */
+.satellite-btn {
+    border-radius: 50%; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0;
+    transition: background 0.3s, color 0.3s, transform 0.05s, box-shadow 0.05s;
+}
+.satellite-btn.mute {
+    position: absolute; bottom: -10px; right: -20px; width: 83px; height: 83px;
+    border: 6px solid var(--slate-mid); z-index: 3;
+}
+.satellite-btn.pause { width: 60px; height: 60px; }
+
+/* Satellite States */
+.satellite-btn { background: var(--slate-high); color: var(--text-bright); }
+.satellite-btn.pressed { background: var(--slate-deep); color: var(--text-soft); }
+
+/* Drawer Overlay */
+.drawer-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(2px);
+    z-index: 150; opacity: 0; pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+.drawer-overlay.active {
+    opacity: 1; pointer-events: auto;
+}
+
+/* Sidebar */
+.sidebar {
+    position: fixed; top: 0; height: 100%; background: var(--slate-deep);
+    transition: right 0.3s ease, left 0.3s ease; z-index: 200; padding: 20px; box-sizing: border-box;
+    display: flex; flex-direction: column; gap: 15px; box-shadow: 0 0 15px rgba(0,0,0,0.5); width: 300px;
+}
+.sidebar-header { display: flex; justify-content: space-between; align-items: center; }
+.btn-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-soft); padding: 0; margin: 0; min-width: auto; width: auto; }
+
+/* Bottom Sheet Drawer */
+.bottom-sheet {
+    position: fixed;
+    bottom: -100%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 100%;
+    max-width: 800px;
+    max-height: 75vh;
+    background: var(--slate-deep);
+    border: 1px solid var(--slate-high);
+    border-bottom: none;
+    border-top-left-radius: 16px;
+    border-top-right-radius: 16px;
+    transition: bottom 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+    z-index: 201; padding: 20px; box-sizing: border-box;
+    display: flex; flex-direction: column; gap: 15px; box-shadow: 0 -5px 20px rgba(0,0,0,0.6);
+}
+
+/* Thread List */
+.thread-item {
+    display: flex; justify-content: space-between; align-items: center; padding: 10px;
+    border-radius: 4px; cursor: pointer; background: transparent; color: var(--text-soft);
+}
+.thread-item.active { background: var(--slate-mid); color: var(--text-bright); }
+.btn-del-circle {
+    width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; padding: 0;
+    background: var(--slate-high); color: var(--text-soft); border: none; cursor: pointer; margin-left: 10px; flex-shrink: 0;
+}
+.btn-del-circle:hover { background: var(--danger-bg); color: var(--danger-text); }
+
+/* Message Bubbles */
+.msg-row { display: flex; align-items: center; margin-bottom: 10px; justify-content: space-between; }
+.msg-content { white-space: pre-wrap; word-break: break-word; }
+.msg-assistant { color: var(--text-bright); font-weight: bold; }
+.msg-user { color: var(--text-soft); }
+
+/* Memory UI */
+.memory-box {
+    margin-bottom: 8px; background: var(--slate-mid); padding: 12px;
+    border-radius: 4px; border: 1px solid var(--slate-high); white-space: normal;
+}
+.memory-stat-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; color: var(--text-soft); }
+.memory-bar-track { background: var(--slate-deep); height: 6px; border-radius: 3px; overflow: hidden; margin-bottom: 12px; }
+.memory-bar-fill-ctx { background: var(--teal-electric); height: 100%; transition: width 0.3s ease; }
+.memory-bar-fill-arc { background: var(--blue-accent); height: 100%; transition: width 0.3s ease; }
+.memory-title { font-size: 13px; color: var(--text-bright); margin-bottom: 8px; font-weight: bold; white-space: normal; }
+.memory-body { line-height: 1.5; color: var(--text-soft); }
+
+@media (max-width: 600px) {
+    .btn-primary, .btn-danger { width: 100%; margin-right: 0; }
+}

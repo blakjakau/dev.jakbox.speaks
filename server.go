@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -90,30 +91,86 @@ func init() {
 	}
 }
 
+var (
+	activeSessions      = make(map[string]*ClientSession)
+	activeSessionsMutex sync.Mutex
+)
+
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
+type Thread struct {
+	ID      string        `json:"id"`
+	Name    string        `json:"name"`
+	History []ChatMessage `json:"history"`
+	Archive []ChatMessage `json:"archive"`
+	Summary string        `json:"summary"`
+}
+
 type ClientSession struct {
 	ClientID string        `json:"-"`
-	History  []ChatMessage `json:"history"`
-	Archive  []ChatMessage `json:"archive"`
-	Summary  string        `json:"summary"`
+	
+	Threads        map[string]*Thread `json:"threads"`
+	ActiveThreadID string             `json:"activeThreadId"`
+	
+	// Legacy fields (kept for automatic migration on load)
+	History  []ChatMessage `json:"history,omitempty"`
+	Archive  []ChatMessage `json:"archive,omitempty"`
+	Summary  string        `json:"summary,omitempty"`
+
 	UserName string        `json:"userName"`
+	GoogleName string      `json:"googleName"`
 	UserBio  string        `json:"userBio"`
 	Provider string        `json:"provider"`
-	APIKey   string        `json:"-"` // Ephemeral API key
+	APIKey   string        `json:"apiKey"`
 	Model    string        `json:"model"`
 	Voice    string        `json:"voice"`
 	Mutex    sync.Mutex    `json:"-"`
+	ClientStorage bool     `json:"clientStorage"`
 	ConnMutex sync.Mutex   `json:"-"` // Dedicated lock for WebSocket writes
+	TokenUsage map[string]int64 `json:"tokenUsage"`
+	Conns map[*websocket.Conn]bool `json:"-"`
+}
+
+func (s *ClientSession) ActiveThread() *Thread {
+	if s.ActiveThreadID == "" {
+		for id := range s.Threads {
+			s.ActiveThreadID = id
+			break
+		}
+	}
+	if t, ok := s.Threads[s.ActiveThreadID]; ok {
+		return t
+	}
+	// Failsafe fallback
+	t := &Thread{ID: "default", Name: "General Chat"}
+	if s.Threads == nil {
+		s.Threads = make(map[string]*Thread)
+	}
+	s.Threads["default"] = t
+	s.ActiveThreadID = "default"
+	return t
 }
 
 func safeWrite(ws *websocket.Conn, session *ClientSession, msgType int, data []byte) error {
+	if ws == nil { return nil }
 	session.ConnMutex.Lock()
 	defer session.ConnMutex.Unlock()
 	return ws.WriteMessage(msgType, data)
+}
+
+func sendOrBroadcastText(ws *websocket.Conn, session *ClientSession, data []byte) {
+	session.ConnMutex.Lock()
+	defer session.ConnMutex.Unlock()
+	if ws != nil {
+		ws.WriteMessage(websocket.TextMessage, data)
+	} else {
+		for conn := range session.Conns {
+			conn.WriteMessage(websocket.TextMessage, data)
+		}
+	}
 }
 
 func getContextPath(clientID string) string {
@@ -124,43 +181,88 @@ func getContextPath(clientID string) string {
 }
 
 func loadSession(clientID string) *ClientSession {
-	session := &ClientSession{ClientID: clientID}
+	session := &ClientSession{ClientID: clientID, Threads: make(map[string]*Thread)}
 	data, err := os.ReadFile(getContextPath(clientID))
 	if err == nil {
 		json.Unmarshal(data, session)
 	}
+	
+	// Seamless migration of legacy flat structure into Thread structure
+	if len(session.Threads) == 0 {
+		t := &Thread{
+			ID: "default", Name: "General Chat",
+			History: session.History, Archive: session.Archive, Summary: session.Summary,
+		}
+		session.Threads["default"] = t
+		session.ActiveThreadID = "default"
+		session.History = nil
+		session.Archive = nil
+		session.Summary = ""
+	}
 	return session
+}
+
+func getOrCreateSession(clientID string) *ClientSession {
+	activeSessionsMutex.Lock()
+	defer activeSessionsMutex.Unlock()
+	if s, exists := activeSessions[clientID]; exists {
+		return s
+	}
+	s := loadSession(clientID)
+	if s.Conns == nil {
+		s.Conns = make(map[*websocket.Conn]bool)
+	}
+	activeSessions[clientID] = s
+	return s
 }
 
 func saveSession(session *ClientSession) {
 	session.Mutex.Lock()
 	defer session.Mutex.Unlock()
+	if session.ClientStorage {
+		os.Remove(getContextPath(session.ClientID))
+		return // Ephemeral mode: do not save to disk
+	}
 	if data, err := json.MarshalIndent(session, "", "  "); err == nil {
 		os.MkdirAll(filepath.Join(".", "context"), 0755)
 		os.WriteFile(getContextPath(session.ClientID), data, 0644)
 	}
 }
 
+func trackTokens(session *ClientSession, key string, tokens int64) {
+	if tokens <= 0 { return }
+	session.Mutex.Lock()
+	defer session.Mutex.Unlock()
+	if session.TokenUsage == nil {
+		session.TokenUsage = make(map[string]int64)
+	}
+	if key == "" { key = "default" }
+	session.TokenUsage[key] += tokens
+}
+
 func sendHistory(ws *websocket.Conn, session *ClientSession) {
 	session.Mutex.Lock()
-	combined := make([]ChatMessage, 0, len(session.Archive)+len(session.History))
-	combined = append(combined, session.Archive...)
-	combined = append(combined, session.History...)
-	historyJSON, err := json.Marshal(combined)
+	t := session.ActiveThread()
+	payload := map[string]interface{}{
+		"history": t.History,
+		"archive": t.Archive,
+	}
+	historyJSON, err := json.Marshal(payload)
 	session.Mutex.Unlock()
 	if err == nil {
-		safeWrite(ws, session, websocket.TextMessage, []byte("[HISTORY]"+string(historyJSON)))
+		sendOrBroadcastText(ws, session, []byte("[HISTORY]"+string(historyJSON)))
 	}
 }
 
 func sendSummary(ws *websocket.Conn, session *ClientSession) {
 	session.Mutex.Lock()
-	summary := session.Summary
-	archiveTurns := len(session.Archive) / 2
+	t := session.ActiveThread()
+	summary := t.Summary
+	archiveTurns := len(t.Archive) / 2
 
 	// Rough token estimate: 1 token ~= 4 chars
 	chars := len(summary)
-	for _, msg := range session.History {
+	for _, msg := range t.History {
 		chars += len(msg.Content)
 	}
 	estTokens := chars / 4
@@ -179,22 +281,44 @@ func sendSummary(ws *websocket.Conn, session *ClientSession) {
 	})
 	session.Mutex.Unlock()
 	if err == nil {
-		safeWrite(ws, session, websocket.TextMessage, []byte("[SUMMARY]"+string(payload)))
+		sendOrBroadcastText(ws, session, []byte("[SUMMARY]"+string(payload)))
 	}
 }
 
 func sendSettings(ws *websocket.Conn, session *ClientSession) {
 	session.Mutex.Lock()
-	settingsJSON, err := json.Marshal(map[string]string{
+	settingsJSON, err := json.Marshal(map[string]interface{}{
 		"userName": session.UserName,
+		"googleName": session.GoogleName,
 		"userBio":  session.UserBio,
 		"provider": session.Provider,
+		"apiKey":   session.APIKey,
 		"model":    session.Model,
 		"voice":    session.Voice,
+		"clientStorage": session.ClientStorage,
+		"tokenUsage": session.TokenUsage,
 	})
 	session.Mutex.Unlock()
 	if err == nil {
-		safeWrite(ws, session, websocket.TextMessage, []byte("[SETTINGS_SYNC]"+string(settingsJSON)))
+		sendOrBroadcastText(ws, session, []byte("[SETTINGS_SYNC]"+string(settingsJSON)))
+	}
+}
+
+func sendThreads(ws *websocket.Conn, session *ClientSession) {
+	session.Mutex.Lock()
+	type threadInfo struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	list := make([]threadInfo, 0) // Explicitly initialize so it marshals to [] instead of null
+	for _, t := range session.Threads {
+		list = append(list, threadInfo{ID: t.ID, Name: t.Name})
+	}
+	payload := map[string]interface{}{"activeId": session.ActiveThreadID, "threads": list}
+	data, err := json.Marshal(payload)
+	session.Mutex.Unlock()
+	if err == nil {
+		sendOrBroadcastText(ws, session, []byte("[THREADS_SYNC]"+string(data)))
 	}
 }
 
@@ -215,43 +339,57 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := cookie.Value
-	fmt.Printf("Client connected: %s\n", clientID)
-	session := loadSession(clientID)
+	clientType := r.URL.Query().Get("client")
+	if clientType == "" {
+		clientType = "unknown"
+	}
+	deviceName, _ := url.QueryUnescape(r.URL.Query().Get("device"))
+	if deviceName == "" {
+		deviceName = "device"
+	}
+	fmt.Printf("Client connected: %s (%s on %s)\n", clientID, clientType, deviceName)
+
+	session := getOrCreateSession(clientID)
+
+	session.ConnMutex.Lock()
+	session.Conns[ws] = true
+	session.ConnMutex.Unlock()
+
+	// Ephemerally store the Google name from the cookie for this session only.
+	// This allows the LLM prompt to use it as a fallback if no custom name is set.
+	googleNameCookie, err := r.Cookie("speax_google_name")
+	if err == nil {
+		googleName, _ := url.QueryUnescape(googleNameCookie.Value)
+		session.GoogleName = googleName
+	}
+
 	var activeCancel context.CancelFunc
 
 	session.Mutex.Lock()
 	connectMsg := fmt.Sprintf("[System Note: User connected at %s]", time.Now().Format("Monday, January 2, 2006, 15:04 MST"))
-	session.History = append(session.History, ChatMessage{Role: "system", Content: connectMsg})
+	session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: connectMsg})
 	session.Mutex.Unlock()
 	saveSession(session)
 
 	defer func() {
+		session.ConnMutex.Lock()
+		delete(session.Conns, ws)
+		session.ConnMutex.Unlock()
+
 		session.Mutex.Lock()
-		lastIdx := len(session.History) - 1
-		if lastIdx >= 0 && strings.HasPrefix(session.History[lastIdx].Content, "[System Note: User connected at") {
+		t := session.ActiveThread()
+		lastIdx := len(t.History) - 1
+		if lastIdx >= 0 && strings.HasPrefix(t.History[lastIdx].Content, "[System Note: User connected at") {
 			// No actual turns were generated, so expunge the connection timestamp
-			session.History = session.History[:lastIdx]
+			t.History = t.History[:lastIdx]
 		} else {
 			disconnectMsg := fmt.Sprintf("[System Note: User disconnected at %s]", time.Now().Format("Monday, January 2, 2006, 15:04 MST"))
-			session.History = append(session.History, ChatMessage{Role: "system", Content: disconnectMsg})
+			t.History = append(t.History, ChatMessage{Role: "system", Content: disconnectMsg})
 		}
 		session.Mutex.Unlock()
 		saveSession(session)
 		ws.Close()
 	}()
-
-	// Sync history to client on connect
-	sendHistory(ws, session)
-	sendSettings(ws, session)
-	sendSummary(ws, session)
-
-	// Retroactively build summary if we have an archive but no summary
-	session.Mutex.Lock()
-	needsSummary := len(session.Archive) > 0 && session.Summary == ""
-	session.Mutex.Unlock()
-	if needsSummary {
-		go rebuildSummaryAsync(session, ws)
-	}
 
 	for {
 		messageType, p, err := ws.ReadMessage()
@@ -263,6 +401,28 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		if messageType == websocket.TextMessage {
 			text := string(p)
 
+			if text == "[REQUEST_SYNC]" {
+				sendThreads(ws, session)
+				sendSettings(ws, session)
+				sendHistory(ws, session)
+				sendSummary(ws, session)
+				continue
+			}
+
+			if text == "[REQUEST_FULL_EXPORT]" {
+				session.Mutex.Lock()
+				payload := map[string]interface{}{
+					"activeId": session.ActiveThreadID,
+					"threads":  session.Threads,
+				}
+				data, err := json.Marshal(payload)
+				session.Mutex.Unlock()
+				if err == nil {
+					safeWrite(ws, session, websocket.TextMessage, []byte("[FULL_EXPORT]"+string(data)))
+				}
+				continue
+			}
+
 			if text == "[INTERRUPT]" {
 				if activeCancel != nil {
 					activeCancel()
@@ -273,9 +433,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 			if text == "[CLEAR_HISTORY]" {
 				session.Mutex.Lock()
-				session.History = []ChatMessage{}
-				session.Archive = []ChatMessage{}
-				session.Summary = ""
+				t := session.ActiveThread()
+				t.History = []ChatMessage{}
+				t.Archive = []ChatMessage{}
+				t.Summary = ""
 				session.Mutex.Unlock()
 				saveSession(session)
 				sendHistory(ws, session)
@@ -284,30 +445,155 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if text == "[REBUILD_SUMMARY]" {
-				go rebuildSummaryAsync(session, ws)
+				go rebuildSummaryAsync(session)
+				continue
+			}
+
+			if strings.HasPrefix(text, "[NEW_THREAD]:") {
+				name := strings.TrimPrefix(text, "[NEW_THREAD]:")
+				if name == "" { name = "New Thread" }
+				id := fmt.Sprintf("%d", time.Now().UnixNano())
+				session.Mutex.Lock()
+				session.Threads[id] = &Thread{ID: id, Name: name}
+				session.ActiveThreadID = id
+				session.Mutex.Unlock()
+				saveSession(session)
+				sendThreads(nil, session)
+				sendHistory(nil, session)
+				sendSummary(nil, session)
+				continue
+			}
+
+			if strings.HasPrefix(text, "[SWITCH_THREAD]:") {
+				id := strings.TrimPrefix(text, "[SWITCH_THREAD]:")
+				session.Mutex.Lock()
+				changed := false
+				if _, exists := session.Threads[id]; exists && session.ActiveThreadID != id {
+					session.ActiveThreadID = id
+					changed = true
+				}
+				session.Mutex.Unlock()
+				if changed {
+					saveSession(session)
+					sendThreads(nil, session)
+					sendHistory(nil, session)
+					sendSummary(nil, session)
+				}
+				continue
+			}
+
+			if strings.HasPrefix(text, "[RENAME_THREAD]:") {
+				name := strings.TrimPrefix(text, "[RENAME_THREAD]:")
+				session.Mutex.Lock()
+				if t := session.ActiveThread(); t != nil {
+					t.Name = name
+				}
+				session.Mutex.Unlock()
+				saveSession(session)
+				sendThreads(nil, session)
+				continue
+			}
+
+			if strings.HasPrefix(text, "[DELETE_THREAD]:") {
+				id := strings.TrimPrefix(text, "[DELETE_THREAD]:")
+				session.Mutex.Lock()
+				delete(session.Threads, id)
+				if session.ActiveThreadID == id || len(session.Threads) == 0 {
+					session.ActiveThreadID = ""
+					session.ActiveThread() // Forces default fallback logic
+				}
+				session.Mutex.Unlock()
+				saveSession(session)
+				sendThreads(nil, session)
+				sendHistory(nil, session)
+				sendSummary(nil, session)
+				continue
+			}
+
+			if strings.HasPrefix(text, "[RESTORE_CLIENT_THREADS]") {
+				var payload struct {
+					ActiveId string             `json:"activeId"`
+					Threads  map[string]*Thread `json:"threads"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(text, "[RESTORE_CLIENT_THREADS]")), &payload); err == nil && len(payload.Threads) > 0 {
+					session.Mutex.Lock()
+					session.ActiveThreadID = payload.ActiveId
+					session.Threads = payload.Threads
+					session.Mutex.Unlock()
+					sendThreads(nil, session)
+					sendHistory(nil, session)
+					sendSummary(nil, session)
+				} else {
+					sendThreads(nil, session)
+					sendHistory(nil, session)
+					sendSummary(nil, session)
+				}
 				continue
 			}
 
 			if strings.HasPrefix(text, "[SETTINGS]") {
 				var settings struct {
 					UserName string `json:"userName"`
+					GoogleName string `json:"googleName"`
 					UserBio  string `json:"userBio"`
 					Provider string `json:"provider"`
 					APIKey   string `json:"apiKey"`
 					Model    string `json:"model"`
 					Voice    string `json:"voice"`
+					ClientStorage bool `json:"clientStorage"`
 				}
 				if err := json.Unmarshal([]byte(strings.TrimPrefix(text, "[SETTINGS]")), &settings); err == nil {
 					session.Mutex.Lock()
-					session.UserName = settings.UserName
-					session.UserBio = settings.UserBio
-					session.Provider = settings.Provider
-					session.APIKey = settings.APIKey
-					session.Model = settings.Model
-					session.Voice = settings.Voice
+					changed := session.UserName != settings.UserName ||
+						session.GoogleName != settings.GoogleName ||
+						session.UserBio != settings.UserBio ||
+						session.Provider != settings.Provider ||
+						session.APIKey != settings.APIKey ||
+						session.Model != settings.Model ||
+						session.Voice != settings.Voice ||
+						session.ClientStorage != settings.ClientStorage
+					if changed {
+						session.UserName = settings.UserName
+						session.UserBio = settings.UserBio
+						session.Provider = settings.Provider
+						session.APIKey = settings.APIKey
+						session.Model = settings.Model
+						session.Voice = settings.Voice
+						session.GoogleName = settings.GoogleName
+						session.ClientStorage = settings.ClientStorage
+					}
 					session.Mutex.Unlock()
-					log.Printf("Updated settings for client %s: User=%s, Provider=%s, Model=%s, Voice=%s", session.ClientID, session.UserName, session.Provider, session.Model, session.Voice)
-					saveSession(session)
+					if changed {
+						log.Printf("Updated settings for client %s: User=%s, Provider=%s, Model=%s, Voice=%s", session.ClientID, session.UserName, session.Provider, session.Model, session.Voice)
+						saveSession(session)
+						sendSettings(nil, session)
+					}
+				}
+				continue
+			}
+
+			if strings.HasPrefix(text, "[TEXT_PROMPT]:") {
+				prompt := strings.TrimSpace(strings.TrimPrefix(text, "[TEXT_PROMPT]:"))
+				if prompt != "" {
+					go func(p string) {
+						session.Mutex.Lock()
+						if activeCancel != nil {
+							activeCancel()
+						}
+						ctx, cancel := context.WithCancel(context.Background())
+						activeCancel = cancel
+						session.Mutex.Unlock()
+
+						// Echo it back to client so it appears in chat immediately
+						sendOrBroadcastText(nil, session, []byte(p))
+						sendOrBroadcastText(nil, session, []byte("[AI_START]"))
+						if err := streamLLMAndTTS(ctx, p, ws, session); err != nil {
+							log.Println("LLM stream error:", err)
+						}
+						log.Println("[LLM] Stream complete (Text Prompt).")
+						sendOrBroadcastText(nil, session, []byte("[AI_END]"))
+						sendHistory(nil, session)
+					}(prompt)
 				}
 				continue
 			}
@@ -316,20 +602,28 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				idx, err := strconv.Atoi(strings.TrimPrefix(text, "[DELETE_MSG]:"))
 				if err == nil {
 					session.Mutex.Lock()
-					archiveLen := len(session.Archive)
+					t := session.ActiveThread()
+					archiveLen := len(t.Archive)
 					isArchiveDelete := false
+					
 					if idx >= 0 && idx < archiveLen {
-						session.Archive = append(session.Archive[:idx], session.Archive[idx+1:]...)
+						// Delete the target message AND the one immediately after it (if it exists)
+						endIdx := idx + 2
+						if endIdx > len(t.Archive) { endIdx = len(t.Archive) }
+						t.Archive = append(t.Archive[:idx], t.Archive[endIdx:]...)
 						isArchiveDelete = true
-					} else if idx >= archiveLen && idx < archiveLen+len(session.History) {
+					} else if idx >= archiveLen && idx < archiveLen+len(t.History) {
 						hIdx := idx - archiveLen
-						session.History = append(session.History[:hIdx], session.History[hIdx+1:]...)
+						// Delete the target message AND the one immediately after it
+						endIdx := hIdx + 2
+						if endIdx > len(t.History) { endIdx = len(t.History) }
+						t.History = append(t.History[:hIdx], t.History[endIdx:]...)
 					}
 					session.Mutex.Unlock()
 					saveSession(session)
-					sendHistory(ws, session) // re-sync UI
+					sendHistory(nil, session) // re-sync UI
 					if isArchiveDelete {
-						go rebuildSummaryAsync(session, ws)
+						go rebuildSummaryAsync(session)
 					}
 				}
 				continue
@@ -353,6 +647,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		if messageType == websocket.BinaryMessage {
 			// Minimum byte length check (~0.5 seconds of 16-bit PCM is 16000 bytes)
 			if len(p) < 16000 {
+				log.Printf("[STT] Ignored short audio chunk: %d bytes", len(p))
 				continue
 			}
 
@@ -363,12 +658,33 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					log.Println("Whisper error:", err)
 					return
 				}
+				log.Printf("[STT] Whisper Transcribed: '%s'", text)
 				
-				// Clean up Whisper's special tokens and hallucinations
-				text = strings.ReplaceAll(text, "[BLANK_AUDIO]", "")
-				text = strings.TrimSpace(text)
+				text = strings.TrimSpace(strings.ReplaceAll(text, "[BLANK_AUDIO]", ""))
 
-				if text != "" {
+				// Filter out Whisper artifacts like [ "..." ] or ( music )
+				isNonResponse := (strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]")) ||
+					(strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")"))
+				
+				// Aggressively suppress common hallucinated "polite" closers that trigger mid-conversation
+				cleanerText := strings.ToLower(strings.Trim(text, ".,! "))
+				isHallucination := cleanerText == "thank you" || 
+								   cleanerText == "thank you." || 
+								   cleanerText == "bye" || 
+								   cleanerText == "bye." || 
+								   cleanerText == "goodbye" || 
+								   cleanerText == "goodbye."
+
+				if isHallucination { isNonResponse = true }
+
+				if isNonResponse {
+					clientText := strings.Replace(text, "[", "(", 1)
+					clientText = strings.Replace(clientText, "]", ")", 1)
+					log.Printf("[STT] Filtered Whisper artifact, sending to client: %s", clientText)
+					// Inform client of the filtered non-response, which some clients use
+					// as a signal to resume paused TTS. This does NOT go to the LLM.
+					safeWrite(ws, session, websocket.TextMessage, []byte(clientText))
+				} else if text != "" {
 					session.Mutex.Lock()
 					if activeCancel != nil {
 						activeCancel()
@@ -377,21 +693,16 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					activeCancel = cancel
 					session.Mutex.Unlock()
 
-					// 1. Send the user's transcription to the browser
-					if err := safeWrite(ws, session, websocket.TextMessage, []byte(text)); err != nil {
-						log.Println("Write error:", err)
-					}
+					sendOrBroadcastText(nil, session, []byte(text))
 
-					// 2. Stream Ollama and TTS responses to the browser
-					safeWrite(ws, session, websocket.TextMessage, []byte("[AI_START]"))
+					sendOrBroadcastText(nil, session, []byte("[AI_START]"))
 					if err := streamLLMAndTTS(ctx, text, ws, session); err != nil {
 						log.Println("Ollama stream error:", err)
 					}
-					safeWrite(ws, session, websocket.TextMessage, []byte("[AI_END]"))
-					// Sync finalized history back to client to enable edit/delete
-					sendHistory(ws, session)
+					log.Println("[LLM] Stream complete.")
+					sendOrBroadcastText(nil, session, []byte("[AI_END]"))
+					sendHistory(nil, session) // Sync finalized history back to client
 				} else {
-					// Inform the frontend that the audio was ignored (e.g., background noise)
 					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
 				}
 			}(p)
@@ -469,6 +780,7 @@ func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, ses
 	apiKey := session.APIKey
 	session.Mutex.Unlock()
 
+	log.Printf("[LLM] Routing request to Provider: '%s', Model: '%s'", provider, session.Model)
 	if provider == "gemini" && apiKey != "" {
 		return streamGeminiAndTTS(ctx, prompt, ws, session, apiKey)
 	}
@@ -479,6 +791,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	session.Mutex.Lock()
 	model := session.Model
 	userName := session.UserName
+	googleName := session.GoogleName
 	userBio := session.UserBio
 	voice := session.Voice
 	if model == "" { model = "gemini-1.5-flash" }
@@ -497,15 +810,24 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		sysContent += fmt.Sprintf("\nUser Bio: %s", userBio)
 	}
 	
+	if userName == "" && session.GoogleName != "" {
+		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", session.GoogleName)
+	}
+
 	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
 	log.Printf("System time injected (Gemini): %s", currentTime)
 	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
 	
 
-	if session.Summary != "" {
-		sysContent += "\n\nContext from earlier in the conversation: " + session.Summary
+	t := session.ActiveThread()
+	log.Printf("\n--- [GEMINI SYSTEM PROMPT] ---\n%s\n------------------------------ [SUMMARY FOLLOWS]\n", sysContent)
+	if t.Summary != "" {
+		sysContent += "\n\nContext from earlier in the conversation: " + t.Summary
 	}
 
+	
+	historySnapshot := make([]ChatMessage, len(t.History))
+	copy(historySnapshot, t.History)
 
 	type Part struct{ Text string `json:"text"` }
 	type Content struct {
@@ -514,7 +836,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	}
 
 	var contents []Content
-	for _, msg := range session.History {
+	for _, msg := range historySnapshot {
 		role := "user"
 		if msg.Role == "assistant" { role = "model" }
 		contents = append(contents, Content{Role: role, Parts: []Part{{Text: msg.Content}}})
@@ -522,24 +844,41 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	contents = append(contents, Content{Role: "user", Parts: []Part{{Text: prompt}}})
 	session.Mutex.Unlock()
 
+	effectiveUserName := userName
+	if effectiveUserName == "" {
+		effectiveUserName = googleName
+	}
+
+	// Prepend system instruction as a dedicated turn for better model compatibility
+	systemContent := Content{Role: "user", Parts: []Part{{Text: sysContent + "\n\n(System instructions processed.)"}}}
+	contents = append([]Content{systemContent}, contents...)
+
 	payload := map[string]interface{}{
-		"systemInstruction": map[string]interface{}{"parts": []Part{{Text: sysContent}}},
 		"contents":          contents,
+		"safetySettings": []map[string]string{
+			{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+			{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+			{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+			{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+		},
 	}
 	body, _ := json.Marshal(payload)
 
 	reqURL := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", model, apiKey)
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
 	if err != nil {
+		log.Printf("[Gemini] Failed to create request: %v", err)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("[Gemini] HTTP request failed: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
+	log.Printf("[Gemini] HTTP Response Status: %s", resp.Status)
 
 	ttsChan := make(chan string, 50)
 	var wg sync.WaitGroup
@@ -561,6 +900,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	var sentence strings.Builder
 	var fullResponse strings.Builder
 	scanner := bufio.NewScanner(resp.Body)
+	var sessionTokens int64
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -574,10 +914,17 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 						Parts []struct{ Text string `json:"text"` } `json:"parts"`
 					} `json:"content"`
 				} `json:"candidates"`
+				UsageMetadata *struct {
+					TotalTokenCount int64 `json:"totalTokenCount"`
+				} `json:"usageMetadata"`
 			}
-			if err := json.Unmarshal([]byte(data), &result); err == nil && len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
+			if err := json.Unmarshal([]byte(data), &result); err == nil {
+				if result.UsageMetadata != nil {
+					sessionTokens = result.UsageMetadata.TotalTokenCount
+				}
+				if len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
 				content := result.Candidates[0].Content.Parts[0].Text
-				safeWrite(ws, session, websocket.TextMessage, []byte(content))
+				sendOrBroadcastText(nil, session, []byte(content))
 				sentence.WriteString(content)
 				fullResponse.WriteString(content)
 
@@ -608,6 +955,9 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 						ttsText = strings.ReplaceAll(ttsText, "#", "")
 						ttsText = strings.ReplaceAll(ttsText, "_", "")
 						ttsText = strings.ReplaceAll(ttsText, "`", "")
+						if effectiveUserName != "" {
+							ttsText = strings.ReplaceAll(ttsText, ", "+effectiveUserName, " "+effectiveUserName)
+						}
 						select {
 						case ttsChan <- ttsText:
 						case <-ctx.Done():
@@ -616,6 +966,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					sentence.Reset()
 					sentence.WriteString(remainder) // Keep the rest for the next chunk
 				}
+			}
 			}
 		}
 	}
@@ -627,6 +978,9 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		ttsText = strings.ReplaceAll(ttsText, "#", "")
 		ttsText = strings.ReplaceAll(ttsText, "_", "")
 		ttsText = strings.ReplaceAll(ttsText, "`", "")
+		if effectiveUserName != "" {
+			ttsText = strings.ReplaceAll(ttsText, ", "+effectiveUserName, " "+effectiveUserName)
+		}
 		select {
 		case ttsChan <- ttsText:
 		case <-ctx.Done():
@@ -638,20 +992,25 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 	if ctx.Err() == nil {
 		session.Mutex.Lock()
-		session.History = append(session.History, ChatMessage{Role: "user", Content: prompt})
-		session.History = append(session.History, ChatMessage{Role: "assistant", Content: fullResponse.String()})
-		if len(session.History) > 30 { // Keep ~15 turns active for the LLM context
+		t := session.ActiveThread()
+		t.History = append(t.History, ChatMessage{Role: "user", Content: prompt})
+		t.History = append(t.History, ChatMessage{Role: "assistant", Content: fullResponse.String()})
+		if len(t.History) > 30 { // Keep ~15 turns active for the LLM context
 			toSummarize := make([]ChatMessage, 10) // Summarize oldest 5 turns
-			copy(toSummarize, session.History[:10])
-			session.Archive = append(session.Archive, toSummarize...)
-			session.History = session.History[10:]
+			copy(toSummarize, t.History[:10])
+			t.Archive = append(t.Archive, toSummarize...)
+			t.History = t.History[10:]
 			
-			if len(session.Archive) > 200 { // Cap the visual UI history to 100 turns
-				session.Archive = session.Archive[len(session.Archive)-200:]
+			if len(t.Archive) > 200 { // Cap the visual UI history to 100 turns
+				t.Archive = t.Archive[len(t.Archive)-200:]
 			}
-			go generateSummaryAsync(toSummarize, session, ws)
+			go generateSummaryAsync(toSummarize, t.ID, session)
 		}
 		session.Mutex.Unlock()
+
+		if sessionTokens > 0 {
+			trackTokens(session, apiKey, sessionTokens)
+		}
 		saveSession(session)
 	}
 	return nil
@@ -661,6 +1020,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	session.Mutex.Lock()
 	model := session.Model
 	userName := session.UserName
+	googleName := session.GoogleName
 	userBio := session.UserBio
 	voice := session.Voice
 	if model == "" { model = ollamaModel }
@@ -680,20 +1040,34 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		sysContent += fmt.Sprintf("\nUser Bio: %s", userBio)
 	}
 
+	if userName == "" && session.GoogleName != "" {
+		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", session.GoogleName)
+	}
+
 	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
 	log.Printf("System time injected (Ollama): %s", currentTime)
 	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
 
-	if session.Summary != "" {
-		sysContent += "\n\nContext from earlier in the conversation: " + session.Summary
+	t := session.ActiveThread()
+	if t.Summary != "" {
+		sysContent += "\n\nContext from earlier in the conversation: " + t.Summary
 	}
+	
+	log.Printf("\n--- [OLLAMA SYSTEM PROMPT] ---\n%s\n------------------------------\n", sysContent)
 
 	messages := []ChatMessage{
 		{Role: "system", Content: sysContent},
 	}
-	messages = append(messages, session.History...)
+	historySnapshot := make([]ChatMessage, len(t.History))
+	copy(historySnapshot, t.History)
+	messages = append(messages, historySnapshot...)
 	messages = append(messages, ChatMessage{Role: "user", Content: prompt})
 	session.Mutex.Unlock()
+
+	effectiveUserName := userName
+	if effectiveUserName == "" {
+		effectiveUserName = googleName
+	}
 
 	payload := map[string]interface{}{
 		"model":    model,
@@ -704,15 +1078,18 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 	req, err := http.NewRequestWithContext(ctx, "POST", ollamaChatURL, bytes.NewReader(body))
 	if err != nil {
+		log.Printf("[Ollama] Failed to create request: %v", err)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("[Ollama] HTTP request failed: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
+	log.Printf("[Ollama] HTTP Response Status: %s", resp.Status)
 
 	decoder := json.NewDecoder(resp.Body)
 	var sentence strings.Builder
@@ -750,6 +1127,8 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				Content string `json:"content"`
 			} `json:"message"`
 			Done bool `json:"done"`
+			PromptEvalCount int64 `json:"prompt_eval_count"`
+			EvalCount       int64 `json:"eval_count"`
 		}
 		if err := decoder.Decode(&result); err != nil {
 			break
@@ -758,7 +1137,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		content := result.Message.Content
 
 		// Stream text token directly to UI
-		safeWrite(ws, session, websocket.TextMessage, []byte(content))
+		sendOrBroadcastText(nil, session, []byte(content))
 
 		// Buffer token for TTS processing
 		sentence.WriteString(content)
@@ -790,6 +1169,9 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				ttsText = strings.ReplaceAll(ttsText, "#", "")
 				ttsText = strings.ReplaceAll(ttsText, "_", "")
 				ttsText = strings.ReplaceAll(ttsText, "`", "")
+				if effectiveUserName != "" {
+					ttsText = strings.ReplaceAll(ttsText, ", "+effectiveUserName, " "+effectiveUserName)
+				}
 				select {
 				case ttsChan <- ttsText:
 				case <-ctx.Done():
@@ -800,6 +1182,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		}
 
 		if result.Done {
+			trackTokens(session, "ollama", result.PromptEvalCount+result.EvalCount)
 			break
 		}
 	}
@@ -812,6 +1195,9 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		ttsText = strings.ReplaceAll(ttsText, "#", "")
 		ttsText = strings.ReplaceAll(ttsText, "_", "")
 		ttsText = strings.ReplaceAll(ttsText, "`", "")
+		if effectiveUserName != "" {
+			ttsText = strings.ReplaceAll(ttsText, ", "+effectiveUserName, " "+effectiveUserName)
+		}
 		select {
 		case ttsChan <- ttsText:
 		case <-ctx.Done():
@@ -825,20 +1211,21 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	// If not interrupted, save to history and trigger background summary if needed
 	if ctx.Err() == nil {
 		session.Mutex.Lock()
-		session.History = append(session.History, ChatMessage{Role: "user", Content: prompt})
-		session.History = append(session.History, ChatMessage{Role: "assistant", Content: fullResponse.String()})
+		t := session.ActiveThread()
+		t.History = append(t.History, ChatMessage{Role: "user", Content: prompt})
+		t.History = append(t.History, ChatMessage{Role: "assistant", Content: fullResponse.String()})
 
-		if len(session.History) > 30 { // Keep ~15 turns active for the LLM context
+		if len(t.History) > 30 { // Keep ~15 turns active for the LLM context
 			toSummarize := make([]ChatMessage, 10) // Summarize oldest 5 turns
-			copy(toSummarize, session.History[:10])
+			copy(toSummarize, t.History[:10])
 
-			session.Archive = append(session.Archive, toSummarize...)
-			session.History = session.History[10:]
+			t.Archive = append(t.Archive, toSummarize...)
+			t.History = t.History[10:]
 
-			if len(session.Archive) > 200 { // Cap the visual UI history to 100 turns
-				session.Archive = session.Archive[len(session.Archive)-200:]
+			if len(t.Archive) > 200 { // Cap the visual UI history to 100 turns
+				t.Archive = t.Archive[len(t.Archive)-200:]
 			}
-			go generateSummaryAsync(toSummarize, session, ws)
+			go generateSummaryAsync(toSummarize, t.ID, session)
 		}
 		session.Mutex.Unlock()
 		saveSession(session)
@@ -847,33 +1234,37 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	return nil
 }
 
-func rebuildSummaryAsync(session *ClientSession, ws *websocket.Conn) {
+func rebuildSummaryAsync(session *ClientSession) {
 	session.Mutex.Lock()
-	archiveCopy := make([]ChatMessage, len(session.Archive))
-	copy(archiveCopy, session.Archive)
-	session.Summary = "" // Clear existing summary to trigger full rebuild
+	t := session.ActiveThread()
+	threadID := t.ID
+	archiveCopy := make([]ChatMessage, len(t.Archive))
+	copy(archiveCopy, t.Archive)
+	t.Summary = "" // Clear existing summary to trigger full rebuild
 	session.Mutex.Unlock()
-	generateSummaryAsync(archiveCopy, session, ws)
+	generateSummaryAsync(archiveCopy, threadID, session)
 }
 
-func generateSummaryAsync(messages []ChatMessage, session *ClientSession, ws *websocket.Conn) {
+func generateSummaryAsync(messages []ChatMessage, threadID string, session *ClientSession) {
 	var transcript strings.Builder
 	for _, msg := range messages {
 		transcript.WriteString(fmt.Sprintf("%s: %s\n", msg.Role, msg.Content))
 	}
 
 	session.Mutex.Lock()
-	prevSummary := session.Summary
+	t, exists := session.Threads[threadID]
+	if !exists { session.Mutex.Unlock(); return }
+	prevSummary := t.Summary
 	provider := session.Provider
 	apiKey := session.APIKey
 	model := session.Model
 	session.Mutex.Unlock()
 
-	prompt := "Summarize the following conversation comprehensively. Capture key facts, user preferences, technical decisions, and the overall progression of the discussion. "
+	prompt := "You are generating a highly condensed context memory for yourself. Extract only essential facts, user preferences, and technical decisions from the following conversation. Disregard pleasantries and conversational filler. Optimize strictly for brevity and token density, as this will be injected into your system prompt for future interactions.\n\n"
 	if prevSummary != "" {
-		prompt += "Incorporate this previous summary context: " + prevSummary + "\n\n"
+		prompt += "Previous Context Memory:\n" + prevSummary + "\n\n"
 	}
-	prompt += "New conversation to add to summary:\n" + transcript.String() + "\n\nProvide a detailed but well-structured summary."
+	prompt += "New conversation to merge:\n" + transcript.String() + "\n\nOutput ONLY the new condensed memory."
 
 	var newSummary string
 	localSuccess := false
@@ -889,10 +1280,15 @@ func generateSummaryAsync(messages []ChatMessage, session *ClientSession, ws *we
 	} else {
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
-			var result struct{ Response string `json:"response"` }
+			var result struct {
+				Response        string `json:"response"`
+				PromptEvalCount int64  `json:"prompt_eval_count"`
+				EvalCount       int64  `json:"eval_count"`
+			}
 			if json.NewDecoder(resp.Body).Decode(&result) == nil {
 				newSummary = strings.TrimSpace(result.Response)
 				localSuccess = true
+				trackTokens(session, "ollama", result.PromptEvalCount+result.EvalCount)
 				log.Println("--- Context Memory Summarized locally via Ollama (Saved API Tokens!) ---")
 			}
 		} else {
@@ -921,9 +1317,15 @@ func generateSummaryAsync(messages []ChatMessage, session *ClientSession, ws *we
 						Parts []struct{ Text string `json:"text"` } `json:"parts"`
 					} `json:"content"`
 				} `json:"candidates"`
+				UsageMetadata *struct {
+					TotalTokenCount int64 `json:"totalTokenCount"`
+				} `json:"usageMetadata"`
 			}
 			if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
 				newSummary = strings.TrimSpace(result.Candidates[0].Content.Parts[0].Text)
+				if result.UsageMetadata != nil {
+					trackTokens(session, apiKey, result.UsageMetadata.TotalTokenCount)
+				}
 				log.Println("--- Context Memory Summarized via Gemini API (Local fallback failed) ---")
 			}
 		}
@@ -931,16 +1333,20 @@ func generateSummaryAsync(messages []ChatMessage, session *ClientSession, ws *we
 
 	if newSummary != "" {
 		session.Mutex.Lock()
-		session.Summary = newSummary
+		if t, ok := session.Threads[threadID]; ok {
+			t.Summary = newSummary
+		}
+		isActive := session.ActiveThreadID == threadID
 		session.Mutex.Unlock()
 		saveSession(session)
-		if ws != nil {
-			sendSummary(ws, session)
+		if isActive {
+			sendSummary(nil, session)
 		}
 	}
 }
 
 func queryTTS(text string, voiceFile string) ([]byte, error) {
+	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s", text, voiceFile)
 	modelPath := filepath.Join(".", "piper", voiceFile)
 	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
 	cmd := exec.Command(piperBin, "--model", modelPath, "-f", "-")
@@ -958,14 +1364,21 @@ func queryTTS(text string, voiceFile string) ([]byte, error) {
 		return nil, fmt.Errorf("piper execution failed: %v, stderr: %s", err, stderr.String())
 	}
 
-	return out.Bytes(), nil
+	audioBytes := out.Bytes()
+	log.Printf("[TTS] Successfully generated %d bytes of audio", len(audioBytes))
+	return audioBytes, nil
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	b := make([]byte, 16)
 	rand.Read(b)
-	state := base64.URLEncoding.EncodeToString(b)
-	http.SetCookie(w, &http.Cookie{Name: "oauthstate", Value: state, Path: "/", MaxAge: 3600, HttpOnly: true})
+	stateBase := base64.URLEncoding.EncodeToString(b)
+	
+	// Embed the client type into the state parameter
+	clientType := r.URL.Query().Get("client")
+	state := stateBase + "|" + clientType
+	
+	http.SetCookie(w, &http.Cookie{Name: "oauthstate", Value: stateBase, Path: "/", MaxAge: 3600, HttpOnly: true})
 
 	baseURL := os.Getenv("PUBLIC_URL")
 	if baseURL == "" {
@@ -983,8 +1396,16 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleCallback(w http.ResponseWriter, r *http.Request) {
+	stateParam := r.FormValue("state")
+	parts := strings.SplitN(stateParam, "|", 2)
+	stateBase := parts[0]
+	clientType := ""
+	if len(parts) > 1 {
+		clientType = parts[1]
+	}
+
 	stateCookie, err := r.Cookie("oauthstate")
-	if err != nil || r.FormValue("state") != stateCookie.Value {
+	if err != nil || stateBase != stateCookie.Value {
 		http.Error(w, "Invalid state", http.StatusBadRequest)
 		return
 	}
@@ -1017,24 +1438,43 @@ func handleCallback(w http.ResponseWriter, r *http.Request) {
 	var tokenRes struct{ AccessToken string `json:"access_token"` }
 	json.NewDecoder(resp.Body).Decode(&tokenRes)
 
-	req, _ := http.NewRequest("GET", "https://www.googleapis.com/oauth2/v2/userinfo", nil)
+	req, _ := http.NewRequest("GET", "https://www.googleapis.com/oauth2/v3/userinfo", nil)
 	req.Header.Set("Authorization", "Bearer "+tokenRes.AccessToken)
 	userResp, _ := http.DefaultClient.Do(req)
 	defer userResp.Body.Close()
+	
+	rawBytes, _ := io.ReadAll(userResp.Body)
+	log.Printf("\n--- [GOOGLE OAUTH RAW RESPONSE] ---\n%s\n-----------------------------------\n", string(rawBytes))
+	userResp.Body = io.NopCloser(bytes.NewBuffer(rawBytes))
 
 	var userRes struct {
-		ID      string `json:"id"`
-		Picture string `json:"picture"`
+		Sub       string `json:"sub"` // v3 user ID
+		ID        string `json:"id"`  // v2 user ID (fallback)
+		Picture   string `json:"picture"`
+		GivenName string `json:"given_name"`
 	}
-	json.NewDecoder(userResp.Body).Decode(&userRes)
+	json.NewDecoder(bytes.NewReader(rawBytes)).Decode(&userRes)
 
-	if userRes.ID == "" {
+	userID := userRes.Sub
+	if userID == "" {
+		userID = userRes.ID
+	} // Prioritize v3, fallback to v2
+
+	if userID == "" {
 		http.Error(w, "Failed to retrieve user ID from Google", http.StatusInternalServerError)
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{Name: "speax_session", Value: userRes.ID, Path: "/", MaxAge: 86400 * 30, HttpOnly: false})
+	http.SetCookie(w, &http.Cookie{Name: "speax_session", Value: userID, Path: "/", MaxAge: 86400 * 30, HttpOnly: false})
 	http.SetCookie(w, &http.Cookie{Name: "speax_avatar", Value: url.QueryEscape(userRes.Picture), Path: "/", MaxAge: 86400 * 30, HttpOnly: false})
+	http.SetCookie(w, &http.Cookie{Name: "speax_google_name", Value: url.QueryEscape(userRes.GivenName), Path: "/", MaxAge: 86400 * 30, HttpOnly: false})
+	
+	// If native Android app, deep link back with the session ID
+	if clientType == "android" {
+		http.Redirect(w, r, "speax://callback?session="+userID+"&name="+url.QueryEscape(userRes.GivenName), http.StatusTemporaryRedirect)
+		return
+	}
+	
 	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 }
 
@@ -1063,11 +1503,27 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 			for _, m := range res.Models {
 				for _, method := range m.SupportedGenerationMethods {
 					if method == "generateContent" {
-						out = append(out, ModelData{ID: strings.TrimPrefix(m.Name, "models/"), Name: m.DisplayName})
+						displayName := m.DisplayName
+						isFlash := strings.Contains(displayName, "Flash")
+						isGemma := strings.Contains(displayName, "Gemma")
+						isGemini2 := strings.Contains(displayName, "Gemini 2")
+						if (isFlash || isGemma) && !isGemini2 {
+							out = append(out, ModelData{ID: strings.TrimPrefix(m.Name, "models/"), Name: displayName})
+						}
 						break
 					}
 				}
 			}
+			// Sort: Gemini models to the top
+			var geminiModels, otherModels []ModelData
+			for _, m := range out {
+				if strings.Contains(m.Name, "Gemini") {
+					geminiModels = append(geminiModels, m)
+				} else {
+					otherModels = append(otherModels, m)
+				}
+			}
+			out = append(geminiModels, otherModels...)
 		}
 	} else if provider == "ollama" {
 		if resp, err := http.Get("http://localhost:11434/api/tags"); err == nil {

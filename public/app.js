@@ -1,4 +1,6 @@
-let socket;
+import { MemoryManager } from './memory.js';
+import { ServerClient } from './server.js';
+
 let outContext;
 let inContext;
 let processor;
@@ -22,6 +24,8 @@ let reconnectDelay = 1000;
 const MAX_RECONNECT_DELAY = 5000;
 let isDictationActive = false;
 let isPaused = false;
+let lastSummaryData = { estTokens: 0, maxTokens: 8192, archiveTurns: 0, maxArchiveTurns: 100, text: "No summary generated yet." };
+let lastTokenUsage = {};
 
 const NOISE_THRESHOLD = 0.015; // RMS threshold. Increase if your room is noisy!
 const SILENCE_FRAMES_LIMIT = 6; // ~0.75 seconds of trailing silence to stop
@@ -29,12 +33,53 @@ const PRE_ROLL_FRAMES = 2; // ~0.5 seconds of audio to keep BEFORE speech is det
 const MIN_CHUNKS = 2; // Require at least ~0.5 seconds of audio to bother sending
 
 const ICON_POWER = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path><line x1="12" y1="2" x2="12" y2="12"></line></svg>`;
-const ICON_WAVE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><path d="M12 2v20M17 7v10M22 10v4M7 7v10M2 10v4"></path></svg>`;
+const ICON_ALYX = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width: 50%; height: 50%;">
+  <g fill="currentColor">
+    <!-- Shadow / Thought Layer -->
+    <g style="opacity: 0.35;">
+      <rect x="14" y="42.65" width="8" height="8.36" rx="4" /><rect x="26" y="27.60" width="8" height="28.35" rx="4" />
+      <rect x="38" y="17.33" width="8" height="54.05" rx="4" /><rect x="50" y="22.74" width="8" height="67.76" rx="4" />
+      <rect x="62" y="40.14" width="8" height="45.75" rx="4" /><rect x="74" y="47.46" width="8" height="21.13" rx="4" />
+      <rect x="86" y="48.02" width="8" height="6.40" rx="4" />
+    </g>
+    <!-- Active / Speech Layer -->
+    <g>
+      <rect x="10" y="45.00" width="8" height="13.37" rx="4" /><rect x="22" y="44.67" width="8" height="27.57" rx="4" />
+      <rect x="34" y="45.99" width="8" height="32.26" rx="4" /><rect x="46" y="38.51" width="8" height="31.38" rx="4" />
+      <rect x="58" y="29.07" width="8" height="26.99" rx="4" /><rect x="70" y="29.93" width="8" height="22.98" rx="4" />
+      <rect x="82" y="41.02" width="8" height="12.13" rx="4" />
+    </g>
+  </g>
+</svg>`;
 const ICON_WAIT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path></svg>`;
 const ICON_MIC = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>`;
 const ICON_MIC_MUTE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><line x1="2" y1="2" x2="22" y2="22"></line><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"></path><path d="M5 10v2a7 7 0 0 0 12 5"></path><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"></path><path d="M9 9v3a3 3 0 0 0 5.12 2.12"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>`;
 const ICON_PAUSE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>`;
 const ICON_PLAY = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 50%; height: 50%;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>`;
+
+async function getDeviceInfo() {
+    if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+        try {
+            const uaData = await navigator.userAgentData.getHighEntropyValues(["model", "brands"]);
+            // Find the most significant browser brand, filtering out generic ones.
+            const browser = uaData.brands.find(b => !/Not.?A.?Brand|Chromium/.test(b.brand)) || uaData.brands[0];
+            const browserName = browser.brand;
+            const model = uaData.model ? ` on ${uaData.model}` : ''; // e.g., "on Pixel 7"
+            return `${browserName}${model}`;
+        } catch (error) {
+            console.warn("Could not get high-entropy user agent data, falling back.", error);
+        }
+    }
+    
+    // Fallback for browsers that don't support User-Agent Client Hints API
+	const ua = navigator.userAgent;
+	if (/Android/i.test(ua)) return "Android Browser";
+	if (/iPhone|iPad|iPod/i.test(ua)) return "iOS Browser";
+	if (/Windows/i.test(ua)) return "Windows Browser";
+	if (/Macintosh/i.test(ua)) return "macOS Browser";
+	if (/Linux/i.test(ua)) return "Linux Browser";
+	return "Unknown Browser";
+}
 
 const status = document.getElementById('status');
 const mainToggleBtn = document.getElementById('mainToggleBtn');
@@ -65,10 +110,17 @@ let progressLogThrottler = 0;
 
 const userProfileContainer = document.getElementById('userProfileContainer');
 const userAvatarBtn = document.getElementById('userAvatarBtn');
-const userDropdown = document.getElementById('userDropdown');
 const menuSettingsBtn = document.getElementById('menuSettingsBtn');
 const menuLogoutBtn = document.getElementById('menuLogoutBtn');
-const settingsFab = document.getElementById('settingsFab');
+
+const threadsFab = document.getElementById('threadsFab');
+const threadsSidebar = document.getElementById('threadsSidebar');
+const closeThreadsBtn = document.getElementById('closeThreadsBtn');
+const newThreadBtn = document.getElementById('newThreadBtn');
+const threadList = document.getElementById('threadList');
+const threadNameInput = document.getElementById('threadNameInput');
+const drawerOverlay = document.getElementById('drawerOverlay');
+
 const settingsSidebar = document.getElementById('settingsSidebar');
 const closeSettingsBtn = document.getElementById('closeSettingsBtn');
 const userName = document.getElementById('userName');
@@ -78,6 +130,7 @@ const geminiSettings = document.getElementById('geminiSettings');
 const geminiApiKey = document.getElementById('geminiApiKey');
 const aiModel = document.getElementById('aiModel');
 const aiVoice = document.getElementById('aiVoice');
+const storageMode = document.getElementById('storageMode');
 const saveSettingsBtn = document.getElementById('saveSettingsBtn');
 
 aiProvider.value = localStorage.getItem('speax_provider') || 'ollama';
@@ -85,6 +138,10 @@ geminiApiKey.value = localStorage.getItem('speax_gemini_key') || '';
 userName.value = localStorage.getItem('speax_user_name') || '';
 userBio.value = localStorage.getItem('speax_user_bio') || '';
 if (aiProvider.value === 'gemini') geminiSettings.style.display = 'flex';
+storageMode.value = localStorage.getItem('speax_client_storage') === 'true' ? 'client' : 'server';
+
+const memoryManager = new MemoryManager();
+let serverClient = null; // initialized below
 
 async function loadModels() {
     const provider = aiProvider.value;
@@ -144,8 +201,16 @@ async function loadVoices() {
     }
 }
 
-settingsFab.onclick = () => settingsSidebar.style.right = '0';
-closeSettingsBtn.onclick = () => settingsSidebar.style.right = '-320px';
+function closeDrawers() {
+    threadsSidebar.style.bottom = '-100%';
+    settingsSidebar.style.left = '-320px';
+    drawerOverlay.classList.remove('active');
+}
+
+drawerOverlay.onclick = closeDrawers;
+threadsFab.onclick = () => { threadsSidebar.style.bottom = '0'; drawerOverlay.classList.add('active'); };
+closeThreadsBtn.onclick = closeDrawers;
+closeSettingsBtn.onclick = closeDrawers;
 aiProvider.onchange = () => { geminiSettings.style.display = aiProvider.value === 'gemini' ? 'flex' : 'none'; loadModels(); };
 geminiApiKey.onblur = () => { if (aiProvider.value === 'gemini') loadModels(); };
 
@@ -156,16 +221,27 @@ saveSettingsBtn.onclick = () => {
     localStorage.setItem('speax_voice', aiVoice.value);
     localStorage.setItem('speax_user_name', userName.value);
     localStorage.setItem('speax_user_bio', userBio.value);
-    settingsSidebar.style.right = '-320px';
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(`[SETTINGS]${JSON.stringify({ 
-            userName: userName.value,
-            userBio: userBio.value,
-            provider: aiProvider.value, 
-            apiKey: geminiApiKey.value, 
-            model: aiModel.value,
-            voice: aiVoice.value
-        })}`);
+    
+    const isClient = storageMode.value === 'client';
+    const wasClient = memoryManager.isClientSide;
+
+    if (isClient !== wasClient && serverClient && serverClient.isOpen()) {
+        if (isClient) {
+            if (confirm("Do you want to transfer all existing server threads to your local browser storage?")) {
+                serverClient.sendRequestFullExport();
+            }
+        } else {
+            if (confirm("Do you want to transfer all your local threads to the server?")) {
+                serverClient.sendRestoreClientThreads(memoryManager.getFullState());
+            }
+        }
+    }
+
+    memoryManager.setClientSide(isClient);
+
+    closeDrawers();
+    if (serverClient && serverClient.isOpen()) {
+        serverClient.sendSettings(getSettingsObj());
     }
 };
 
@@ -175,7 +251,7 @@ loadVoices();
 if (document.cookie.includes('speax_session=')) {
     authSection.style.display = 'none';
     appSection.style.display = 'flex';
-    settingsFab.style.display = 'flex';
+    threadsFab.style.display = 'flex';
     userProfileContainer.style.display = 'block';
     
     const avatarCookie = document.cookie.split('; ').find(row => row.startsWith('speax_avatar='));
@@ -187,16 +263,11 @@ if (document.cookie.includes('speax_session=')) {
 } else {
     authSection.style.display = 'block';
     appSection.style.display = 'none';
-    settingsFab.style.display = 'none';
+    threadsFab.style.display = 'none';
     userProfileContainer.style.display = 'none';
 }
 
-userAvatarBtn.onclick = (e) => {
-    e.stopPropagation();
-    userDropdown.style.display = userDropdown.style.display === 'flex' ? 'none' : 'flex';
-};
-document.addEventListener('click', () => userDropdown.style.display = 'none');
-menuSettingsBtn.onclick = () => { settingsSidebar.style.right = '0'; };
+menuSettingsBtn.onclick = () => { settingsSidebar.style.left = '0'; drawerOverlay.classList.add('active'); };
 menuLogoutBtn.onclick = () => {
     document.cookie = "speax_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
     document.cookie = "speax_avatar=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
@@ -205,17 +276,49 @@ menuLogoutBtn.onclick = () => {
 
 loginBtn.onclick = () => window.location.href = '/auth/login';
 
+const textInputContainer = document.createElement('div');
+textInputContainer.className = 'text-input-container';
+textInputContainer.innerHTML = `
+    <input type="text" id="chatTextInput" placeholder="Type a message..." style="flex-grow: 1; padding: 12px; border-radius: 24px; border: 1px solid var(--border, #444); background: var(--surface, #222); color: var(--on-surface, #fff); outline: none;">
+    <button id="chatSendBtn" style="margin-left: 8px; padding: 12px 18px; border-radius: 24px; border: none; background: var(--primary, #00d1c1); color: #000; cursor: pointer; font-weight: bold;">Send</button>
+`;
+textInputContainer.style.display = 'none';
+textInputContainer.style.padding = '12px 16px';
+textInputContainer.style.alignItems = 'center';
+textInputContainer.style.flexShrink = '0';
+transcript.parentNode.insertBefore(textInputContainer, transcript.nextSibling);
+
+const chatTextInput = document.getElementById('chatTextInput');
+const chatSendBtn = document.getElementById('chatSendBtn');
+
+function sendTypedMessage() {
+    const text = chatTextInput.value.trim();
+    if (text && serverClient && serverClient.isOpen()) {
+        serverClient.send(`[TEXT_PROMPT]:${text}`);
+        chatTextInput.value = '';
+        stopAudio();
+    }
+}
+chatSendBtn.onclick = sendTypedMessage;
+chatTextInput.onkeydown = (e) => { if (e.key === 'Enter') sendTypedMessage(); };
+
 function switchTab(activeBtn, activeView) {
-    [homeTabBtn, threadTabBtn, memoryTabBtn].forEach(btn => {
-        if(btn) { btn.style.background = 'transparent'; btn.style.color = '#aaa'; }
-    });
-    if(activeBtn) { activeBtn.style.background = '#0e639c'; activeBtn.style.color = 'white'; }
+    [homeTabBtn, threadTabBtn, memoryTabBtn].forEach(btn => btn?.classList.remove('active'));
+    activeBtn?.classList.add('active');
     
     if(homeView) homeView.style.display = 'none';
-    if(transcript) transcript.style.display = 'none';
+    if(transcript) {
+        transcript.style.display = 'none';
+        textInputContainer.style.display = 'none';
+    }
     if(summaryView) summaryView.style.display = 'none';
     
-    if(activeView) activeView.style.display = activeView === homeView ? 'flex' : 'block';
+    if(activeView) {
+        activeView.style.display = activeView === homeView ? 'flex' : 'block';
+        if (activeView === transcript) {
+            textInputContainer.style.display = 'flex';
+        }
+    }
 }
 
 if(homeTabBtn) homeTabBtn.onclick = () => switchTab(homeTabBtn, homeView);
@@ -254,221 +357,298 @@ mainToggleBtn.onclick = async () => {
         isDictationActive = true;
         reconnectDelay = 1000;
         mainToggleBtn.innerHTML = ICON_WAIT;
-        mainToggleBtn.style.background = '#d7ba7d';
+        mainToggleBtn.className = 'main-toggle-btn processing';
         connectWebSocket();
     }
 };
 
-function connectWebSocket() {
-    if (!isDictationActive) return;
-    status.innerText = "Status: Connecting...";
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    
-    socket.onopen = () => {
-        status.innerText = isMuted ? "Status: Connected - Muted" : "Status: Connected - Listening...";
-        mainToggleBtn.innerHTML = ICON_WAVE;
-        mainToggleBtn.style.background = '#4ec9b0';
-        muteBtn.style.display = 'flex';
-        muteBtn.innerHTML = isMuted ? ICON_MIC_MUTE : ICON_MIC;
-        pauseBtn.style.display = 'flex';
-        pauseBtn.innerHTML = isPaused ? ICON_PLAY : ICON_PAUSE;
-        reconnectDelay = 1000; // Reset delay on successful connection
-        requestWakeLock();
-        if (!processor) startRecording(); // Only start audio if not already running
+threadNameInput.onblur = () => {
+    if (serverClient && serverClient.isOpen()) serverClient.sendRenameThread(threadNameInput.value);
+};
+threadNameInput.onkeydown = (e) => { if (e.key === 'Enter') threadNameInput.blur(); };
+
+newThreadBtn.onclick = () => {
+    const name = prompt("New thread name:", "New Thread");
+    if (name && serverClient && serverClient.isOpen()) serverClient.sendNewThread(name);
+};
+
+function getSettingsObj() {
+    const googleNameMatch = document.cookie.match(/(?:^|; )speax_google_name=([^;]*)/);
+    const googleName = googleNameMatch ? decodeURIComponent(googleNameMatch[1]) : '';
+
+    return {
+        userName: localStorage.getItem('speax_user_name') || '',
+        googleName: localStorage.getItem('speax_google_name') || googleName,
+        userBio: localStorage.getItem('speax_user_bio') || '',
+        provider: localStorage.getItem('speax_provider') || 'ollama', 
+        apiKey: localStorage.getItem('speax_gemini_key') || '',
+        model: localStorage.getItem('speax_model') || '',
+        voice: localStorage.getItem('speax_voice') || '',
+        clientStorage: memoryManager.isClientSide
     };
+}
 
-    socket.onmessage = async (event) => {
-        // If the server sends us a Blob (Binary), it's Text-to-Speech audio!
-        if (event.data instanceof Blob) {
-            // Estimate duration: 16kHz 16-bit mono = 32,000 bytes per second
-            const estSecs = Math.max(0, event.data.size - 44) / 32000;
+function renderMemoryTab() {
+    if (!summaryContent) return;
+    const data = lastSummaryData;
+    const ctxPct = Math.min(100, (data.estTokens / data.maxTokens) * 100) || 0;
+    const arcPct = Math.min(100, (data.archiveTurns / data.maxArchiveTurns) * 100) || 0;
+    
+    let tokenHtml = '';
+    const usageKeys = Object.keys(lastTokenUsage);
+    if (usageKeys.length > 0) {
+        tokenHtml = `<div class="memory-title" >API Token Usage:</div><div class="memory-box">`;
+        usageKeys.forEach(k => {
+            const displayKey = (k === 'ollama' || k === 'default') ? 'Local (Ollama)' : (k.length > 10 ? `Key: ...${k.slice(-4)}` : k);
+            const tokens = lastTokenUsage[k].toLocaleString();
+            tokenHtml += `<div class="memory-stat-row" style="margin-bottom: 4px;"><span>${displayKey}</span><span style="color: var(--primary, #00d1c1); font-weight: bold;">${tokens}</span></div>`;
+        });
+        tokenHtml += `</div>`;
+    }
+
+    summaryContent.innerHTML = `
+        <div class="memory-box">
+            <div style="margin-bottom: 12px;">
+                <div class="memory-stat-row"><span>Active Context Est. (Tokens)</span><span>${data.estTokens.toLocaleString()} / ${data.maxTokens.toLocaleString()}</span></div>
+                <div class="memory-bar-track"><div class="memory-bar-fill-ctx" style="width: ${ctxPct}%;"></div></div>
+            </div>
+            <div>
+                <div class="memory-stat-row" ><span>Archive Capacity (Turns)</span><span>${data.archiveTurns} / ${data.maxArchiveTurns}</span></div>
+                <div class="memory-bar-track" style="margin-bottom:0;"><div class="memory-bar-fill-arc" style="width: ${arcPct}%;"></div></div>
+            </div>
+        </div>
+        ${tokenHtml}
+        <div class="memory-title">Summary of ${data.archiveTurns} older turns:</div>
+        <div class="memory-body">${data.text || "No summary generated yet."}</div>
+    `;
+}
+
+const deviceInfo = await getDeviceInfo();
+
+serverClient = new ServerClient(
+    `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?client=web&device=${encodeURIComponent(deviceInfo)}`,
+    {
+        onOpen: () => {
+            status.innerText = isMuted ? "Status: Connected - Muted" : "Status: Connected - Listening...";
+            mainToggleBtn.innerHTML = ICON_ALYX;
+            mainToggleBtn.className = 'main-toggle-btn listening';
+            muteBtn.style.display = 'flex';
+            muteBtn.innerHTML = isMuted ? ICON_MIC_MUTE : ICON_MIC;
+            muteBtn.classList.toggle('pressed', isMuted);
+            pauseBtn.style.display = 'flex';
+            pauseBtn.innerHTML = isPaused ? ICON_PLAY : ICON_PAUSE;
+            pauseBtn.classList.toggle('pressed', isPaused);
+            reconnectDelay = 1000; 
+            requestWakeLock();
+            if (!processor) startRecording(); 
+            
+            if (memoryManager.isClientSide) {
+                // Rehydrate empty server memory with our local reality
+                serverClient.sendRestoreClientThreads(memoryManager.getFullState());
+            } else {
+                serverClient.sendRequestSync();
+            }
+        },
+        onClose: () => {
+            status.innerText = "Status: Disconnected";
+            stopRecording();
+            releaseWakeLock();
+            
+            if (isDictationActive) {
+                status.innerText = `Status: Reconnecting in ${reconnectDelay / 1000}s...`;
+                setTimeout(() => serverClient.connect(), reconnectDelay);
+                reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+            } else {
+                mainToggleBtn.innerHTML = ICON_POWER;
+                mainToggleBtn.className = 'main-toggle-btn disconnected';
+                mainToggleBtn.style.transform = 'scale(1)';
+                mainToggleBtn.style.boxShadow = 'none';
+                muteBtn.style.display = 'none';
+                pauseBtn.style.display = 'none';
+                isPaused = false;
+            }
+        },
+        onAudioChunk: (blob) => {
+            const estSecs = Math.max(0, blob.size - 44) / 32000;
             aiAudioTotalSecs += estSecs;
-            console.log(`[Audio Rx] Chunk size: ${event.data.size} bytes. Est length: ${estSecs.toFixed(2)}s. New Total: ${aiAudioTotalSecs.toFixed(2)}s`);
-            audioQueue.push(event.data);
+            audioQueue.push(blob);
             if (!isPlayingAudio) playNextAudio();
-            return;
-        }
-
-        // Otherwise, it's our transcribed text from Whisper
-        status.innerText = isMuted ? "Status: Connected - Muted" : "Status: Connected - Listening...";
-        
-        const rawText = event.data;
-
-        if (rawText.startsWith("[SETTINGS_SYNC]")) {
-            const s = JSON.parse(rawText.substring(15));
-            if (s.provider) { // If server has state, overwrite local storage
+        },
+        onSettingsSync: (s) => {
+            if (s.tokenUsage) {
+                lastTokenUsage = s.tokenUsage;
+                renderMemoryTab();
+            }
+            if (s.provider) { 
                 localStorage.setItem('speax_user_name', s.userName || '');
                 localStorage.setItem('speax_user_bio', s.userBio || '');
                 localStorage.setItem('speax_provider', s.provider);
                 localStorage.setItem('speax_model', s.model || '');
                 localStorage.setItem('speax_voice', s.voice || '');
+                localStorage.setItem('speax_client_storage', s.clientStorage ? 'true' : 'false');
+                localStorage.setItem('speax_google_name', s.googleName || '');
                 
                 userName.value = s.userName || '';
                 userBio.value = s.userBio || '';
                 aiProvider.value = s.provider;
+                storageMode.value = s.clientStorage ? 'client' : 'server';
                 geminiSettings.style.display = s.provider === 'gemini' ? 'flex' : 'none';
+                memoryManager.setClientSide(s.clientStorage);
                 
                 loadModels().then(() => { if (s.model) aiModel.value = s.model; });
                 loadVoices().then(() => { if (s.voice) aiVoice.value = s.voice; });
             }
-            
-            // Send combined state back to server (syncs local API key to ephemeral server session)
-            socket.send(`[SETTINGS]${JSON.stringify({ 
-                userName: localStorage.getItem('speax_user_name') || '',
-                userBio: localStorage.getItem('speax_user_bio') || '',
-                provider: localStorage.getItem('speax_provider') || 'ollama', 
-                apiKey: localStorage.getItem('speax_gemini_key') || '',
-                model: localStorage.getItem('speax_model') || '',
-                voice: localStorage.getItem('speax_voice') || ''
-            })}`);
-            return;
-        }
-
-        if (rawText.startsWith("[HISTORY]")) {
-            const historyData = JSON.parse(rawText.substring(9));
-            
-            // Capture scroll state before modifying the DOM
+            serverClient.sendSettings(getSettingsObj());
+        },
+        onThreadsSync: (data) => {
+            const safeThreads = data.threads || [];
+            threadNameInput.value = safeThreads.find(t => t.id === data.activeId)?.name || 'General Chat';
+            threadList.innerHTML = '';
+            safeThreads.forEach(t => {
+                const btn = document.createElement('div');
+                btn.className = `thread-item ${t.id === data.activeId ? 'active' : ''}`;
+                
+                const nameSpan = document.createElement('span');
+                nameSpan.innerText = t.name;
+                nameSpan.style.flexGrow = '1';
+                nameSpan.onclick = () => {
+                    if(t.id !== data.activeId) serverClient.sendSwitchThread(t.id);
+                    closeDrawers();
+                };
+                
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn-del-circle';
+                delBtn.innerText = 'X';
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    if(confirm('Delete this thread?')) serverClient.sendDeleteThread(t.id);
+                };
+                
+                btn.appendChild(nameSpan);
+                btn.appendChild(delBtn);
+                threadList.appendChild(btn);
+            });
+            memoryManager.updateThreads(data.activeId, safeThreads);
+        },
+        onHistorySync: (data) => {
             const prevScrollTop = transcript.scrollTop;
             const wasAtBottom = transcript.scrollHeight - transcript.scrollTop <= transcript.clientHeight + 50;
 
-            transcript.innerHTML = ''; // Clear board
-            historyData.forEach((msg, idx) => {
+            transcript.innerHTML = '';
+            const combined = [...(data.archive || []), ...(data.history || [])];
+            
+            combined.forEach((msg, idx) => {
                 const msgDiv = document.createElement('div');
-                msgDiv.style.marginBottom = '10px';
-                msgDiv.style.display = 'flex';
+                msgDiv.className = 'msg-row';
                 
-                const delBtn = document.createElement('button');
-                delBtn.innerText = 'X';
-                delBtn.title = 'Delete this turn';
-                delBtn.style.padding = '0';
-                delBtn.style.margin = '0 0 0 10px';
-                delBtn.style.height = '24px';
-                delBtn.style.width = '24px';
-                delBtn.style.borderRadius = '50%';
-                delBtn.style.background = '#555';
-                delBtn.style.color = '#ccc';
-                delBtn.style.display = 'flex';
-                delBtn.style.alignItems = 'center';
-                delBtn.style.justifyContent = 'center';
-                delBtn.style.flexShrink = '0';
-                delBtn.onclick = () => {
-                    if (socket && socket.readyState === WebSocket.OPEN) {
-                        socket.send(`[DELETE_MSG]:${idx}`);
-                    }
-                };
+                let delBtn = null;
+                if (msg.role !== 'assistant' && msg.role !== 'system') {
+                    delBtn = document.createElement('button');
+                    delBtn.className = 'btn-del-circle';
+                    delBtn.innerText = 'X';
+                    delBtn.title = 'Delete this interaction';
+                    delBtn.onclick = () => {
+                        serverClient.sendDeleteMsg(idx);
+                        // Optimistically remove the pair from the DOM instantly
+                        const nextEl = msgDiv.nextElementSibling;
+                        msgDiv.remove();
+                        if (nextEl && nextEl.querySelector('span') && nextEl.querySelector('span').innerText.includes('Alyx:')) nextEl.remove();
+                    };
+                }
                 
                 const contentSpan = document.createElement('span');
-                contentSpan.style.whiteSpace = 'pre-wrap';
-                contentSpan.style.wordBreak = 'break-word';
+                contentSpan.className = 'msg-content';
                 if (msg.role === 'assistant') {
-                    contentSpan.style.color = '#4ec9b0';
+                    contentSpan.classList.add('msg-assistant');
                     contentSpan.innerText = `Alyx: ${msg.content}`;
                 } else {
-                    const uName = userName.value || 'User';
+                    contentSpan.classList.add('msg-user');
+                    const gNameMatch = document.cookie.match(/(?:^|; )speax_google_name=([^;]*)/);
+                    const gName = localStorage.getItem('speax_google_name') || (gNameMatch ? decodeURIComponent(gNameMatch[1]) : 'User');
+                    const uName = userName.value || gName;
                     contentSpan.innerText = `${uName}: ${msg.content}`;
                 }
                 
                 msgDiv.appendChild(contentSpan);
-                msgDiv.appendChild(delBtn);
-                msgDiv.style.justifyContent = 'space-between';
+                if (delBtn) msgDiv.appendChild(delBtn);
                 transcript.appendChild(msgDiv);
             });
             
-            // Restore scroll state smoothly
-            if (wasAtBottom) {
-                transcript.scrollTop = transcript.scrollHeight;
-            } else {
-                transcript.scrollTop = prevScrollTop;
-            }
-            return;
-        }
+            if (wasAtBottom) transcript.scrollTop = transcript.scrollHeight;
+            else transcript.scrollTop = prevScrollTop;
 
-        if (rawText.startsWith("[SUMMARY]")) {
+            memoryManager.updateActiveMemory(data.history, data.archive, undefined);
+        },
+        onSummarySync: (data) => {
             try {
-                const data = JSON.parse(rawText.substring(9));
-                const ctxPct = Math.min(100, (data.estTokens / data.maxTokens) * 100);
-                const arcPct = Math.min(100, (data.archiveTurns / data.maxArchiveTurns) * 100);
-                
-                // Minimized HTML string to avoid white-space: pre-wrap rendering issues
-                summaryContent.innerHTML = `<div style="margin-bottom: 20px; background: #1e1e1e; padding: 12px; border-radius: 4px; border: 1px solid #333; white-space: normal;"><div style="margin-bottom: 12px;"><div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; color: #aaa;"><span>Active Context Est. (Tokens)</span><span>${data.estTokens.toLocaleString()} / ${data.maxTokens.toLocaleString()}</span></div><div style="background: #333; height: 6px; border-radius: 3px; overflow: hidden;"><div style="background: #4ec9b0; height: 100%; width: ${ctxPct}%; transition: width 0.3s ease;"></div></div></div><div><div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; color: #aaa;"><span>Archive Capacity (Turns)</span><span>${data.archiveTurns} / ${data.maxArchiveTurns}</span></div><div style="background: #333; height: 6px; border-radius: 3px; overflow: hidden;"><div style="background: #0e639c; height: 100%; width: ${arcPct}%; transition: width 0.3s ease;"></div></div></div></div><div style="font-size: 13px; color: #ce9178; margin-bottom: 8px; font-weight: bold; white-space: normal;">Summary of ${data.archiveTurns} older turns:</div><div style="line-height: 1.5; color: #d4d4d4;">${data.text || "No summary generated yet."}</div>`;
+                lastSummaryData = data;
+                renderMemoryTab();
             } catch (e) {
-                summaryContent.innerText = rawText.substring(9) || "No summary generated yet.";
+                summaryContent.innerText = data.text || "No summary generated yet.";
             }
-            return;
-        }
-
-        const text = rawText.trim();
-        
-        if (text === "[AI_START]") {
+            memoryManager.updateActiveMemory(undefined, undefined, data.text || "");
+        },
+        onFullExportSync: (data) => {
+            memoryManager.activeId = data.activeId;
+            memoryManager.threads = data.threads || {};
+            memoryManager.saveToDisk();
+            alert("Transfer complete. Your threads are now saved locally.");
+        },
+        onAiStart: () => {
             aiAudioTotalSecs = 0;
             aiAudioPlayedSecs = 0;
             currentVisualPercent = 0;
             progressBar.style.transition = 'none';
             progressBar.style.width = '0%';
             currentAiDiv = document.createElement('div');
-            currentAiDiv.style.color = '#4ec9b0';
+            currentAiDiv.className = 'msg-content msg-assistant';
             currentAiDiv.innerText = 'Alyx: ';
             transcript.appendChild(currentAiDiv);
             transcript.scrollTop = transcript.scrollHeight;
-            return;
-        } else if (text === "[AI_END]") {
+        },
+        onAiEnd: () => {
             currentAiDiv = null;
-            return;
-        } else if (text === "[IGNORED]") {
+        },
+        onAiText: (text) => {
+            if (currentAiDiv) currentAiDiv.innerText += text;
+            transcript.scrollTop = transcript.scrollHeight;
+        },
+        onUserText: (text) => {
+            stopAudio(); 
+            const msg = document.createElement('div');
+            const gNameMatch = document.cookie.match(/(?:^|; )speax_google_name=([^;]*)/);
+            const gName = localStorage.getItem('speax_google_name') || (gNameMatch ? decodeURIComponent(gNameMatch[1]) : 'User');
+            const uName = userName.value || gName;
+            msg.innerText = `${uName}: ${text}`;
+            transcript.appendChild(msg);
+            transcript.scrollTop = transcript.scrollHeight;
+        },
+        onIgnored: () => {
             if (outContext && outContext.state === 'suspended') {
                 outContext.resume();
             }
-            return;
         }
+    }
+);
 
-        if (currentAiDiv) {
-            currentAiDiv.innerText += rawText; // keep the spaces!
-        } else if (text) {
-            stopAudio(); // Abort the paused audio because we have valid STT
-            const msg = document.createElement('div');
-            const uName = userName.value || 'User';
-            msg.innerText = `${uName}: ${text}`;
-            transcript.appendChild(msg);
-        }
-        transcript.scrollTop = transcript.scrollHeight;
-    };
-
-    socket.onclose = () => {
-        status.innerText = "Status: Disconnected";
-        stopRecording();
-        releaseWakeLock();
-        
-        if (isDictationActive) {
-            status.innerText = `Status: Reconnecting in ${reconnectDelay / 1000}s...`;
-            setTimeout(connectWebSocket, reconnectDelay);
-            reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
-        } else {
-            mainToggleBtn.innerHTML = ICON_POWER;
-            mainToggleBtn.style.background = '#0e639c';
-            mainToggleBtn.style.transform = 'scale(1)';
-            mainToggleBtn.style.boxShadow = 'none';
-            muteBtn.style.display = 'none';
-            pauseBtn.style.display = 'none';
-            isPaused = false;
-        }
-    };
+function connectWebSocket() {
+    if (!isDictationActive) return;
+    status.innerText = "Status: Connecting...";
+    serverClient.connect();
 }
 
 muteBtn.onclick = () => {
     isMuted = !isMuted;
     if (isMuted) {
         muteBtn.innerHTML = ICON_MIC_MUTE;
-        muteBtn.style.background = '#d16969';
-        muteBtn.style.color = 'white';
+        muteBtn.classList.add('pressed');
         muteBtn.style.transform = 'scale(1)';
         muteBtn.style.boxShadow = 'none';
-        if (!isPlayingAudio && socket && socket.readyState === WebSocket.OPEN) status.innerText = "Status: Connected - Muted";
+        if (!isPlayingAudio && serverClient.isOpen()) status.innerText = "Status: Connected - Muted";
     } else {
         muteBtn.innerHTML = ICON_MIC;
-        muteBtn.style.background = '#d7ba7d';
-        muteBtn.style.color = '#1e1e1e';
-        if (!isPlayingAudio && socket && socket.readyState === WebSocket.OPEN) {
+        muteBtn.classList.remove('pressed');
+        if (!isPlayingAudio && serverClient.isOpen()) {
             status.innerText = "Status: Connected - Listening...";
             if (!inputVisualizerId && inputAnalyser) renderInputVisualizer();
         }
@@ -476,17 +656,18 @@ muteBtn.onclick = () => {
 };
 
 clearHistoryBtn.onclick = () => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    if (serverClient.isOpen()) {
         if (confirm("Are you sure you want to expunge all memory?")) {
-            socket.send("[CLEAR_HISTORY]");
+            serverClient.sendClearHistory();
+            memoryManager.clear();
         }
     }
 };
 
 if (rebuildSummaryBtn) {
     rebuildSummaryBtn.onclick = () => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send("[REBUILD_SUMMARY]");
+        if (serverClient.isOpen()) {
+            serverClient.sendRebuildSummary();
             rebuildSummaryBtn.innerText = "Rebuilding...";
             setTimeout(() => { rebuildSummaryBtn.innerText = "Rebuild Summary"; }, 3000); // Visual reset
         }
@@ -495,9 +676,9 @@ if (rebuildSummaryBtn) {
 
 function stopEverything() {
     isDictationActive = false; // Prevent auto-reconnect
-    if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+    serverClient.disconnect();
     mainToggleBtn.innerHTML = ICON_POWER;
-    mainToggleBtn.style.background = '#0e639c';
+    mainToggleBtn.className = 'main-toggle-btn disconnected';
     muteBtn.style.display = 'none';
     pauseBtn.style.display = 'none';
     isPaused = false;
@@ -509,16 +690,14 @@ pauseBtn.onclick = () => {
     isPaused = !isPaused;
     if (isPaused) {
         pauseBtn.innerHTML = ICON_PLAY;
-        pauseBtn.style.background = '#d7ba7d';
-        pauseBtn.style.color = '#1e1e1e';
+        pauseBtn.classList.add('pressed');
         if (outContext && outContext.state === 'running') outContext.suspend();
         if (!isMuted) muteBtn.click(); // Mute mic
         if (audioChunks.length > 0) sendAndClearBuffer(); // Flush any pending audio
         status.innerText = "Status: Paused";
     } else {
         pauseBtn.innerHTML = ICON_PAUSE;
-        pauseBtn.style.background = '#555';
-        pauseBtn.style.color = 'white';
+        pauseBtn.classList.remove('pressed');
         if (outContext && outContext.state === 'suspended') outContext.resume();
         if (isMuted) muteBtn.click(); // Unmute mic
         if (!isPlayingAudio && audioQueue.length > 0) playNextAudio(); // Drain the accumulated buffer
@@ -598,9 +777,9 @@ function updateProgressBar() {
         // Lerp magic: Move visual percent 10% of the way to the target percent every frame
         currentVisualPercent += (targetPercent - currentVisualPercent) * 0.1;
     
-    if (progressLogThrottler++ % 15 === 0) {
-            console.log(`[Progress UI] Target: ${targetPercent.toFixed(1)}% | Visual: ${currentVisualPercent.toFixed(1)}%`);
-    }
+    // if (progressLogThrottler++ % 15 === 0) {
+    //         console.log(`[Progress UI] Target: ${targetPercent.toFixed(1)}% | Visual: ${currentVisualPercent.toFixed(1)}%`);
+    // }
 
         progressBar.style.width = `${currentVisualPercent}%`;
     
@@ -626,7 +805,8 @@ function renderInputVisualizer() {
     const shadow = (avg / 255) * 40;
     
     muteBtn.style.transform = `scale(${scale})`;
-    muteBtn.style.boxShadow = `0 0 ${shadow}px ${shadow/2}px rgba(215, 186, 125, 0.8)`;
+    // Pulse Blue for User Input (14, 99, 156 is the RGB for #0E639C)
+    muteBtn.style.boxShadow = `0 0 ${shadow}px ${shadow/2}px rgba(14, 99, 156, 0.8)`;
     
     inputVisualizerId = requestAnimationFrame(renderInputVisualizer);
 }
@@ -651,7 +831,7 @@ function renderVisualizer() {
     const shadow = (avg / 255) * 60;
     
     mainToggleBtn.style.transform = `scale(${scale})`;
-    mainToggleBtn.style.boxShadow = `0 0 ${shadow}px ${shadow/2}px rgba(78, 201, 176, 0.8)`;
+    mainToggleBtn.style.boxShadow = `0 0 ${shadow}px ${shadow/2}px rgba(0, 209, 193, 0.8)`;
     
     visualizerId = requestAnimationFrame(renderVisualizer);
 }
@@ -747,7 +927,7 @@ async function startRecording() {
 }
 
 function sendAndClearBuffer() {
-    if (socket.readyState !== WebSocket.OPEN) {
+    if (!serverClient.isOpen()) {
         audioChunks = []; // Don't hoard memory if socket is dead
         return;
     }
@@ -761,7 +941,7 @@ function sendAndClearBuffer() {
         }
     }
     
-    socket.send(pcmData.buffer);
+    serverClient.send(pcmData.buffer);
     audioChunks = [];
 }
 
