@@ -971,7 +971,7 @@ fun ChatScreen() {
         // Auto-scroll to bottom when new text arrives or the keyboard opens
         LaunchedEffect(mainActivity.messages.size, mainActivity.messages.lastOrNull()?.content?.length, isImeVisible) {
         if (mainActivity.messages.isNotEmpty()) {
-            listState.animateScrollToItem(mainActivity.messages.size - 1)
+            listState.scrollToItem(mainActivity.messages.size - 1)
         }
     }
 
