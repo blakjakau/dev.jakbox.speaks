@@ -56,7 +56,7 @@ fun ThreadTab(mainActivity: MainActivity, listState: LazyListState) {
             TextButton(
                 onClick = {
                     if (inputText.isNotBlank()) {
-                        mainActivity.sendTextPrompt(inputText)
+                        mainActivity.sendTypedPrompt(inputText)
                         inputText = ""
                     }
                 },

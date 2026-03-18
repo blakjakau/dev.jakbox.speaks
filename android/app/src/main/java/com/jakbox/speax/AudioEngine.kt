@@ -19,7 +19,8 @@ class AudioEngine(
     private val onVolumeChange: (Float) -> Unit = {},
     private val onSpeechStart: () -> Unit = {},
     private val onAiVolumeChange: (Float) -> Unit = {},
-    private val onBufferProgress: (Float) -> Unit = {}
+    private val onBufferProgress: (Float) -> Unit = {},
+    private val onPlaybackComplete: () -> Unit = {}
 ) {
 
     private val sampleRate = 16000
@@ -38,6 +39,8 @@ class AudioEngine(
     private val audioQueue = LinkedBlockingQueue<Pair<ByteArray, Int>>()
     @Volatile private var isPausedLocally = false
     var isMicMuted = false
+    var micProfile: String = "standard"
+    var averageSpeechRms = 600.0 // Baseline adaptive RMS tracker
     private var totalAiFrames = 0
     private var totalWrittenFrames = 0
     private val rmsQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<Int, Float>>()
@@ -65,7 +68,7 @@ class AudioEngine(
 
         // Explicitly attach hardware filtering to match PWA capabilities
         val sessionId = audioRecord?.audioSessionId ?: 0
-        if (sessionId != 0) {
+        if (sessionId != 0 && micProfile == "heavy") {
             if (NoiseSuppressor.isAvailable()) {
                 noiseSuppressor = NoiseSuppressor.create(sessionId)
                 noiseSuppressor?.enabled = true
@@ -95,9 +98,21 @@ class AudioEngine(
                 val readResult = audioRecord?.read(buffer, 0, FRAME_SIZE, AudioRecord.READ_BLOCKING) ?: 0
                 if (readResult > 0) {
                     
+                    val isAiPlaying = audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING || audioQueue.isNotEmpty()
+                    var targetDuckMultiplier = 1.0f
+                    if (isAiPlaying) {
+                        if (micProfile == "mute_playback") {
+                            targetDuckMultiplier = 0.0f
+                        } else if (micProfile == "adaptive") {
+                            targetDuckMultiplier = Math.max(0.01f, Math.min(0.5f, (averageSpeechRms.toFloat() / 600.0f) * 0.1f))
+                        } else {
+                            targetDuckMultiplier = 0.1f
+                        }
+                    }
+
                     // Apply Digital Gain Boost
                     for (i in 0 until readResult) {
-                        var sample = (buffer[i] * GAIN_MULTIPLIER).toInt()
+                        var sample = (buffer[i] * GAIN_MULTIPLIER * targetDuckMultiplier).toInt()
                         // Hard clip to prevent integer overflow distortion
                         if (sample > Short.MAX_VALUE) sample = Short.MAX_VALUE.toInt()
                         if (sample < Short.MIN_VALUE) sample = Short.MIN_VALUE.toInt()
@@ -114,13 +129,40 @@ class AudioEngine(
                     // Pipe volume back to UI for the visualizer
                     onVolumeChange(if (isMicMuted) 0f else rms.toFloat())
 
+                    val currentThreshold = if (micProfile == "adaptive") Math.max(100.0, averageSpeechRms * 0.3) else noiseThreshold
+
                     if (isMicMuted) {
+                        if (isSpeaking) {
+                            isSpeaking = false
+                            silenceFrames = 0
+                            if (audioChunks.size >= MIN_CHUNKS) {
+                                var sumSquares = 0.0
+                                var totalSamples = 0
+                                // Flatten short arrays to byte array for WebSocket
+                                val byteBuffer = java.nio.ByteBuffer.allocate(audioChunks.sumOf { it.size } * 2)
+                                byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                for (chunk in audioChunks) {
+                                    for (sample in chunk) {
+                                        byteBuffer.putShort(sample)
+                                        sumSquares += sample.toDouble() * sample.toDouble()
+                                        totalSamples++
+                                    }
+                                }
+                                if (totalSamples > 0) {
+                                    val chunkRms = sqrt(sumSquares / totalSamples)
+                                    averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms)
+                                }
+                                Log.d("AudioEngine", "Speech finalized due to mute, sending ${byteBuffer.capacity()} bytes")
+                                onSpeechFinalized(byteBuffer.array())
+                            }
+                            audioChunks.clear()
+                        }
                         preRollBuffer.add(buffer.copyOf(readResult))
                         if (preRollBuffer.size > PRE_ROLL_FRAMES) preRollBuffer.removeAt(0)
                         continue
                     }
 
-                    if (rms > noiseThreshold) {
+                    if (rms > currentThreshold) {
                         if (!isSpeaking) {
                             Log.d("AudioEngine", "Speech detected! Suspending playback instantly.")
                             isSpeaking = true
@@ -139,13 +181,21 @@ class AudioEngine(
                             silenceFrames = 0
                             
                             if (audioChunks.size >= MIN_CHUNKS) {
+                                var sumSquares = 0.0
+                                var totalSamples = 0
                                 // Flatten short arrays to byte array for WebSocket
                                 val byteBuffer = java.nio.ByteBuffer.allocate(audioChunks.sumOf { it.size } * 2)
                                 byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
                                 for (chunk in audioChunks) {
                                     for (sample in chunk) {
                                         byteBuffer.putShort(sample)
+                                        sumSquares += sample.toDouble() * sample.toDouble()
+                                        totalSamples++
                                     }
+                                }
+                                if (totalSamples > 0) {
+                                    val chunkRms = sqrt(sumSquares / totalSamples)
+                                    averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms)
                                 }
                                 Log.d("AudioEngine", "Speech finalized, sending ${byteBuffer.capacity()} bytes")
                                 onSpeechFinalized(byteBuffer.array())
@@ -229,7 +279,11 @@ class AudioEngine(
                         if (poppedAny) {
                             onAiVolumeChange(targetRms)
                         } else if (rmsQueue.isEmpty() && currentFrame >= totalWrittenFrames) {
-                            onAiVolumeChange(0f) // Audio finished, drop to 0
+                            if (totalAiFrames > 0) { // Only fire if we actually played something
+                                totalAiFrames = 0 // Resetting this acts as a latch so we only fire once per playback queue exhaustion
+                                onAiVolumeChange(0f) // Audio finished, drop to 0
+                                onPlaybackComplete()
+                            }
                         }
                     }
                     try {
