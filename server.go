@@ -49,7 +49,26 @@ type Config struct {
 	ToolSystemPrompt     string   `json:"ToolSystemPrompt"`
 }
 
-var config Config
+func (c *Config) Validate() error {
+	if len(c.WhisperURLs) == 0 {
+		return fmt.Errorf("WhisperURLs cannot be empty")
+	}
+	if len(c.OllamaURLs) == 0 {
+		return fmt.Errorf("OllamaURLs cannot be empty")
+	}
+	if len(c.OllamaChatURL) == 0 {
+		return fmt.Errorf("OllamaChatURL cannot be empty")
+	}
+	if c.PiperBin == "" {
+		return fmt.Errorf("PiperBin cannot be empty")
+	}
+	return nil
+}
+
+var (
+	config      Config
+	configMutex sync.RWMutex
+)
 
 var (
 	whisperIndex    uint32
@@ -65,6 +84,53 @@ func getNextURL(urls []string, index *uint32) string {
 	return urls[int(newIdx-1)%len(urls)]
 }
 
+func reloadConfig(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var newConfig Config
+	if err := json.Unmarshal(data, &newConfig); err != nil {
+		return err
+	}
+	if err := newConfig.Validate(); err != nil {
+		return err
+	}
+
+	configMutex.Lock()
+	config = newConfig
+	configMutex.Unlock()
+	return nil
+}
+
+func watchConfig(path string) {
+	initialStat, err := os.Stat(path)
+	if err != nil {
+		log.Printf("Error stating config file: %v", err)
+		return
+	}
+
+	lastModTime := initialStat.ModTime()
+	ticker := time.NewTicker(2 * time.Second)
+	go func() {
+		for range ticker.C {
+			stat, err := os.Stat(path)
+			if err != nil {
+				continue
+			}
+			if stat.ModTime().After(lastModTime) {
+				lastModTime = stat.ModTime()
+				log.Println("Config file change detected, reloading...")
+				if err := reloadConfig(path); err != nil {
+					log.Printf("FAILED to reload config: %v (Update ignored)", err)
+				} else {
+					log.Println("Config successfully reloaded")
+				}
+			}
+		}
+	}()
+}
+
 var (
 	googleClientID     string
 	googleClientSecret string
@@ -72,14 +138,11 @@ var (
 
 func init() {
 	// Load server.config
-	confData, err := os.ReadFile("server.config")
-	if err != nil {
-		log.Fatal("FATAL: Could not read server.config: ", err)
-	}
-	if err := json.Unmarshal(confData, &config); err != nil {
-		log.Fatal("FATAL: Could not parse server.config: ", err)
+	if err := reloadConfig("server.config"); err != nil {
+		log.Fatal("FATAL: Could not load server.config: ", err)
 	}
 	log.Println("Loaded server settings from server.config")
+	watchConfig("server.config")
 
 	data, err := os.ReadFile("google-client-secret.json")
 	if err == nil {
@@ -192,7 +255,12 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	}
 
 	lowerPrompt := strings.ToLower(prompt)
-	for _, word := range config.WakeWords {
+	configMutex.RLock()
+	wakeWords := config.WakeWords
+	passiveWindowSeconds := config.PassiveWindowSeconds
+	configMutex.RUnlock()
+
+	for _, word := range wakeWords {
 		if strings.Contains(lowerPrompt, word) {
 			session.Mutex.Lock()
 			session.LastActiveTime = time.Now()
@@ -203,7 +271,7 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	}
 
 	session.Mutex.Lock()
-	recentlyActive := baseTime.Sub(session.LastActiveTime) < time.Duration(config.PassiveWindowSeconds)*time.Second
+	recentlyActive := baseTime.Sub(session.LastActiveTime) < time.Duration(passiveWindowSeconds)*time.Second
 	if recentlyActive {
 		session.LastActiveTime = time.Now() // Reset the window from the moment of processing
 	}
@@ -419,10 +487,14 @@ func sendSummary(ws *websocket.Conn, session *ClientSession) {
 		maxTokens = 1000000 // Gemini 1.5 Flash scale
 	}
 
+	configMutex.RLock()
+	maxArchiveTurns := config.MaxArchiveTurns
+	configMutex.RUnlock()
+
 	payload, err := json.Marshal(map[string]interface{}{
 		"text":            summary,
 		"archiveTurns":    archiveTurns,
-		"maxArchiveTurns": config.MaxArchiveTurns, // 100 messages / 2
+		"maxArchiveTurns": maxArchiveTurns, // 100 messages / 2
 		"estTokens":       estTokens,
 		"maxTokens":       maxTokens,
 	})
@@ -937,7 +1009,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				v := session.Voice
 				session.Mutex.Unlock()
 				if v == "" {
+					configMutex.RLock()
 					v = config.DefaultVoice
+					configMutex.RUnlock()
 				}
 				audioBytes, err := queryTTS(t, v)
 				if err != nil {
@@ -1039,8 +1113,12 @@ func addWavHeader(pcmData []byte) []byte {
 	binary.Write(buf, binary.LittleEndian, uint32(16))
 	binary.Write(buf, binary.LittleEndian, uint16(1))     // AudioFormat: PCM
 	binary.Write(buf, binary.LittleEndian, uint16(1))     // NumChannels: Mono
-	binary.Write(buf, binary.LittleEndian, uint32(config.SampleRate)) // SampleRate: e.g. 16kHz
-	binary.Write(buf, binary.LittleEndian, uint32(config.SampleRate*2)) // ByteRate: SampleRate * NumChannels * BitsPerSample/8
+	configMutex.RLock()
+	sampleRate := config.SampleRate
+	configMutex.RUnlock()
+
+	binary.Write(buf, binary.LittleEndian, uint32(sampleRate)) // SampleRate: e.g. 16kHz
+	binary.Write(buf, binary.LittleEndian, uint32(sampleRate*2)) // ByteRate: SampleRate * NumChannels * BitsPerSample/8
 	binary.Write(buf, binary.LittleEndian, uint16(2))     // BlockAlign: NumChannels * BitsPerSample/8
 	binary.Write(buf, binary.LittleEndian, uint16(16))    // BitsPerSample: 16
 	// data chunk
@@ -1066,7 +1144,11 @@ func queryWhisper(audioData []byte) (string, error) {
 	part.Write(wavData)
 	writer.Close()
 
-	url := getNextURL(config.WhisperURLs, &whisperIndex)
+	configMutex.RLock()
+	whisperURLs := config.WhisperURLs
+	configMutex.RUnlock()
+
+	url := getNextURL(whisperURLs, &whisperIndex)
 	resp, err := http.Post(url, writer.FormDataContentType(), body)
 	if err != nil {
 		return "", err
@@ -1108,7 +1190,11 @@ func buildToolSystemPrompt(session *ClientSession) string {
 
 	schemasJSON, _ := json.MarshalIndent(promptData, "", "  ")
 
-	return fmt.Sprintf(config.ToolSystemPrompt, string(schemasJSON))
+	configMutex.RLock()
+	toolSystemPrompt := config.ToolSystemPrompt
+	configMutex.RUnlock()
+
+	return fmt.Sprintf(toolSystemPrompt, string(schemasJSON))
 }
 
 func extractVoiceName(filename string) string {
@@ -1149,14 +1235,19 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	googleName := session.GoogleName
 	userBio := session.UserBio
 	voice := session.Voice
+	configMutex.RLock()
+	defaultVoice := config.DefaultVoice
+	systemPromptGemini := config.SystemPromptGemini
+	configMutex.RUnlock()
+
 	if model == "" {
 		model = "gemini-1.5-flash"
 	}
 	if voice == "" {
-		voice = config.DefaultVoice
+		voice = defaultVoice
 	}
 	voiceName := extractVoiceName(voice)
-	sysContent := fmt.Sprintf(config.SystemPromptGemini, model, voiceName)
+	sysContent := fmt.Sprintf(systemPromptGemini, model, voiceName)
 
 	if userName != "" {
 		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", userName)
@@ -1585,14 +1676,20 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	googleName := session.GoogleName
 	userBio := session.UserBio
 	voice := session.Voice
+	configMutex.RLock()
+	ollamaModelConfig := config.OllamaModel
+	defaultVoiceConfig := config.DefaultVoice
+	systemPromptOllama := config.SystemPromptOllama
+	configMutex.RUnlock()
+
 	if model == "" {
-		model = config.OllamaModel
+		model = ollamaModelConfig
 	}
 	if voice == "" {
-		voice = config.DefaultVoice
+		voice = defaultVoiceConfig
 	}
 	voiceName := extractVoiceName(voice)
-	sysContent := fmt.Sprintf(config.SystemPromptOllama, model, voiceName)
+	sysContent := fmt.Sprintf(systemPromptOllama, model, voiceName)
 
 	if userName != "" {
 		sysContent += fmt.Sprintf("\n\nThe user's name is: %s.", userName)
@@ -1637,7 +1734,11 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	}
 	body, _ := json.Marshal(payload)
 
-	url := getNextURL(config.OllamaChatURL, &ollamaChatIndex)
+	configMutex.RLock()
+	ollamaChatURLs := config.OllamaChatURL
+	configMutex.RUnlock()
+
+	url := getNextURL(ollamaChatURLs, &ollamaChatIndex)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("[Ollama] Failed to create request: %v", err)
@@ -1989,12 +2090,17 @@ func generateSummaryAsync(messages []ChatMessage, threadID string, session *Clie
 	var newSummary string
 	localSuccess := false
 
+	configMutex.RLock()
+	ollamaModelConfig := config.OllamaModel
+	ollamaURLs := config.OllamaURLs
+	configMutex.RUnlock()
+
 	// 1. Always attempt local summarization first to save tokens (Fast fail after 10s)
-	localPayload := map[string]interface{}{"model": config.OllamaModel, "prompt": prompt, "stream": false}
+	localPayload := map[string]interface{}{"model": ollamaModelConfig, "prompt": prompt, "stream": false}
 	localBody, _ := json.Marshal(localPayload)
 
 	client := &http.Client{Timeout: 60 * time.Second}
-	url := getNextURL(config.OllamaURLs, &ollamaIndex)
+	url := getNextURL(ollamaURLs, &ollamaIndex)
 	resp, err := client.Post(url, "application/json", bytes.NewReader(localBody))
 	if err != nil {
 		log.Printf("Local Ollama summary failed (Network/Timeout): %v", err)
@@ -2093,7 +2199,11 @@ func queryTTS(text string, voiceFile string) ([]byte, error) {
 	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s", text, voiceFile)
 	modelPath := filepath.Join(".", "piper", voiceFile)
 	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
-	cmd := exec.Command(config.PiperBin, "--model", modelPath, "-f", "-")
+	configMutex.RLock()
+	piperBin := config.PiperBin
+	configMutex.RUnlock()
+
+	cmd := exec.Command(piperBin, "--model", modelPath, "-f", "-")
 
 	// Feed our text into Piper's standard input
 	cmd.Stdin = strings.NewReader(text)
