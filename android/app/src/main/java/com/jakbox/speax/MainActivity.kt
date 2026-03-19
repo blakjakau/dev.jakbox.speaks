@@ -1337,7 +1337,13 @@ fun ChatScreen() {
 
                     // Mic Profile Dropdown
                     var expandedMicDropdown by remember { mutableStateOf(false) }
-                    val micProfiles = listOf("standard" to "Standard", "heavy" to "Heavy Filtering", "adaptive" to "Adaptive Filtering", "mute_playback" to "Mute on Playback")
+                    val micProfiles = listOf(
+                        "sensitive" to "Sensitive (Low Filtering)",
+                        "standard" to "Standard", 
+                        "adaptive" to "Adaptive Filtering", 
+                        "heavy" to "Heavy Filtering", 
+                        "mute_playback" to "Mute on Playback"
+                    )
                     val currentMicProfileLabel = micProfiles.find { it.first == mainActivity.micProfile }?.second ?: "Standard"
 
                     ExposedDropdownMenuBox(
@@ -1364,8 +1370,10 @@ fun ChatScreen() {
                                         mainActivity.getSharedPreferences("speax_prefs", Context.MODE_PRIVATE).edit().putString("mic_profile", value).apply()
                                         mainActivity.audioEngine.micProfile = value
                                         expandedMicDropdown = false
-                                        // If using heavy, we need to restart the engine
-                                        if (value == "heavy" || mainActivity.micProfile == "heavy") {
+                                        // If using heavy, sensitive, or standard, we need to restart the engine to apply new AudioSource/FX
+                                        if (value == "heavy" || mainActivity.micProfile == "heavy" || 
+                                            value == "sensitive" || mainActivity.micProfile == "sensitive" ||
+                                            value == "standard" || mainActivity.micProfile == "standard") {
                                             if (!mainActivity.isMicMuted) {
                                                 mainActivity.audioEngine.stopRecording()
                                                 mainActivity.audioEngine.startRecording()

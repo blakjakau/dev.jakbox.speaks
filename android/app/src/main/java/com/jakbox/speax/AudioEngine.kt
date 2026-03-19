@@ -48,7 +48,7 @@ class AudioEngine(
 
     // VAD Constants
     // 500.0 matches the 0.015 float threshold from the PWA (0.015 * 32768 ≈ 491.5)
-    var noiseThreshold = 300.0 
+    var noiseThreshold = 255.0 // Reduced from 300.0 by ~15% for better sensitivity
     private val SILENCE_FRAMES_LIMIT = 65 // 65 frames * 32ms = ~2s silence before finalizing
     private val PRE_ROLL_FRAMES = 16 // 16 frames * 32ms = ~0.5s to catch soft leading consonants
     private val MIN_CHUNKS = 16 // 16 frames * 1024 bytes = ~16,384 bytes minimum for Whisper
@@ -59,8 +59,10 @@ class AudioEngine(
     fun startRecording() {
         if (recordingThread != null) return
 
+        val audioSource = if (micProfile == "sensitive" || micProfile == "standard") MediaRecorder.AudioSource.VOICE_RECOGNITION else MediaRecorder.AudioSource.VOICE_COMMUNICATION
+
         audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            audioSource,
             sampleRate,
             channelConfig,
             audioFormat,
@@ -112,8 +114,9 @@ class AudioEngine(
                     }
 
                     // Apply Digital Gain Boost
+                    val dynamicGain = if (micProfile == "sensitive") 1.8f else GAIN_MULTIPLIER
                     for (i in 0 until readResult) {
-                        var sample = (buffer[i] * GAIN_MULTIPLIER * targetDuckMultiplier).toInt()
+                        var sample = (buffer[i] * dynamicGain * targetDuckMultiplier).toInt()
                         // Hard clip to prevent integer overflow distortion
                         if (sample > Short.MAX_VALUE) sample = Short.MAX_VALUE.toInt()
                         if (sample < Short.MIN_VALUE) sample = Short.MIN_VALUE.toInt()
@@ -130,7 +133,8 @@ class AudioEngine(
                     // Pipe volume back to UI for the visualizer
                     onVolumeChange(if (isMicMuted) 0f else rms.toFloat())
 
-                    val currentThreshold = if (micProfile == "adaptive") Math.max(100.0, averageSpeechRms * 0.3) else noiseThreshold
+                    var currentThreshold = if (micProfile == "adaptive") Math.max(100.0, averageSpeechRms * 0.3) else noiseThreshold
+                    if (micProfile == "sensitive") currentThreshold = 150.0 // Increased sensitivity (lower threshold)
 
                     if (isMicMuted) {
                         if (isSpeaking) {

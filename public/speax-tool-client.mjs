@@ -127,6 +127,20 @@ export class SpeaxToolClient {
         console.log(`[SpeaxToolClient ${this.toolName}] Synced ${actionPayloads.length} actions.`);
     }
 
+    /**
+     * Send an unsolicited event to the orchestrator.
+     * @param {string} eventName - Type of event (e.g. "TIMER_EXPIRED")
+     * @param {Object} payload - Data associated with the event
+     */
+    sendEvent(eventName, payload) {
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            const msg = JSON.stringify({ eventName, toolName: this.toolName, payload });
+            this.socket.send(`[TOOL_EVENT]${msg}`);
+        } else {
+            console.error(`[SpeaxToolClient ${this.toolName}] Cannot send event, socket is closed!`);
+        }
+    }
+
     async _handleExecutionRequest(request) {
         const { executionId, actionName, params } = request;
         console.log(`[SpeaxToolClient ${this.toolName}] Received execution request ${executionId} for action: ${actionName}`, params);

@@ -38,7 +38,7 @@ let nativeSttDebounceTimer = null;
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 const isNativeSttSupported = !!SpeechRecognition;
 
-const NOISE_THRESHOLD = 0.015; // RMS threshold. Increase if your room is noisy!
+const NOISE_THRESHOLD = 0.013; // RMS threshold. Reduced by ~15% for better sensitivity.
 let averageSpeechRms = 0.05; // Baseline adaptive RMS tracker
 const SILENCE_FRAMES_LIMIT = 6; // ~0.75 seconds of trailing silence to stop
 const PRE_ROLL_FRAMES = 2; // ~0.5 seconds of audio to keep BEFORE speech is detected
@@ -156,6 +156,7 @@ micProfileContainer.style.margin = '12px 0';
 micProfileContainer.innerHTML = `
     <span style="flex-grow:1; color:var(--on-surface);">Mic Profile</span>
     <select id="micProfileSelect" style="padding:4px; border-radius:4px; background:var(--surface-variant); color:var(--on-surface); border:1px solid var(--outline);">
+        <option value="sensitive">Sensitive (Low Filtering)</option>
         <option value="standard">Standard</option>
         <option value="adaptive">Adaptive Filtering</option>
         <option value="heavy">Heavy Filtering</option>
@@ -171,8 +172,8 @@ micProfileSelect.addEventListener('change', () => {
     localStorage.setItem('speax_mic_profile', currentMicProfile);
 
     // If we're recording, we might need to restart it to apply new device constraints
-    if (inContext && inContext.state !== 'closed' && (currentMicProfile === 'heavy' || localStorage.getItem('speax_mic_profile') === 'heavy')) {
-        // Need to ask for new constraints from getUserMedia if switching to/from heavy
+    if (inContext && inContext.state !== 'closed' && (currentMicProfile === 'heavy' || localStorage.getItem('speax_mic_profile') === 'heavy' || currentMicProfile === 'sensitive' || localStorage.getItem('speax_mic_profile') === 'sensitive')) {
+        // Need to ask for new constraints from getUserMedia if switching to/from heavy or sensitive
     }
 });
 
@@ -673,6 +674,30 @@ function stopNativeListening() {
 
 const deviceInfo = await getDeviceInfo();
 
+function enforceMessageCollapsing() {
+    const userMsgs = document.querySelectorAll('.msg-user');
+    for (let i = 0; i < userMsgs.length; i++) {
+        const span = userMsgs[i];
+        if (i < userMsgs.length - 5 && !span.dataset.manualExpand) {
+            span.classList.add('collapsed-msg');
+        } else if (i >= userMsgs.length - 5) {
+            span.classList.remove('collapsed-msg');
+            delete span.dataset.manualExpand;
+        }
+    }
+
+    const aiMsgs = document.querySelectorAll('.msg-assistant');
+    for (let i = 0; i < aiMsgs.length; i++) {
+        const span = aiMsgs[i];
+        if (i < aiMsgs.length - 5 && !span.dataset.manualExpand) {
+            span.classList.add('collapsed-msg');
+        } else if (i >= aiMsgs.length - 5) {
+            span.classList.remove('collapsed-msg');
+            delete span.dataset.manualExpand;
+        }
+    }
+}
+
 serverClient = new ServerClient(
     `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?client=web&device=${encodeURIComponent(deviceInfo)}`,
     {
@@ -814,19 +839,29 @@ serverClient = new ServerClient(
                         const nextEl = msgDiv.nextElementSibling;
                         msgDiv.remove();
                         if (nextEl && nextEl.querySelector('span') && nextEl.querySelector('span').innerText.includes('Alyx:')) nextEl.remove();
+                        enforceMessageCollapsing();
                     };
                 }
 
                 const contentSpan = document.createElement('span');
                 contentSpan.className = 'msg-content';
+                let expandBtn = null;
+
                 if (msg.role === 'assistant') {
                     contentSpan.classList.add('msg-assistant');
                     contentSpan.innerText = `Alyx: ${msg.content}`;
                 } else if (msg.role === 'system') {
                     contentSpan.classList.add('msg-system');
-                    contentSpan.style.color = '#888';
-                    contentSpan.style.fontStyle = 'italic';
+                    contentSpan.classList.add('collapsed-msg');
                     contentSpan.innerText = `[System]: ${msg.content}`;
+                    expandBtn = document.createElement('button');
+                    expandBtn.className = 'btn-toggle-expand';
+                    expandBtn.innerText = 'Expand';
+                    expandBtn.onclick = () => {
+                        contentSpan.classList.toggle('collapsed-msg');
+                        expandBtn.innerText = contentSpan.classList.contains('collapsed-msg') ? 'Expand' : 'Collapse';
+                    };
+                    contentSpan.onclick = () => expandBtn.click();
                 } else {
                     contentSpan.classList.add('msg-user');
                     const gNameMatch = document.cookie.match(/(?:^|; )speax_google_name=([^;]*)/);
@@ -835,7 +870,16 @@ serverClient = new ServerClient(
                     contentSpan.innerText = `${uName}: ${msg.content}`;
                 }
 
+                if (msg.role !== 'system') {
+                    contentSpan.onclick = () => {
+                        contentSpan.classList.toggle('collapsed-msg');
+                        if (!contentSpan.classList.contains('collapsed-msg')) contentSpan.dataset.manualExpand = 'true';
+                        else delete contentSpan.dataset.manualExpand;
+                    };
+                }
+
                 msgDiv.appendChild(contentSpan);
+                if (expandBtn) msgDiv.appendChild(expandBtn);
                 if (delBtn) msgDiv.appendChild(delBtn);
                 transcript.appendChild(msgDiv);
             });
@@ -843,6 +887,7 @@ serverClient = new ServerClient(
             if (wasAtBottom) transcript.scrollTop = transcript.scrollHeight;
             else transcript.scrollTop = prevScrollTop;
 
+            enforceMessageCollapsing();
             memoryManager.updateActiveMemory(data.history, data.archive, undefined);
         },
         onSummarySync: (data) => {
@@ -924,11 +969,23 @@ serverClient = new ServerClient(
             currentVisualPercent = 0;
             progressBar.style.transition = 'none';
             progressBar.style.width = '0%';
-            currentAiDiv = document.createElement('div');
+
+            currentAiDiv = document.createElement('span');
             currentAiDiv.className = 'msg-content msg-assistant';
             currentAiDiv.innerText = 'Alyx: ';
-            transcript.appendChild(currentAiDiv);
+            currentAiDiv.onclick = () => {
+                currentAiDiv.classList.toggle('collapsed-msg');
+                if (!currentAiDiv.classList.contains('collapsed-msg')) currentAiDiv.dataset.manualExpand = 'true';
+                else delete currentAiDiv.dataset.manualExpand;
+            };
+
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'msg-row';
+            msgDiv.appendChild(currentAiDiv);
+
+            transcript.appendChild(msgDiv);
             transcript.scrollTop = transcript.scrollHeight;
+            enforceMessageCollapsing();
         },
         onAiEnd: () => {
             currentAiDiv = null;
@@ -938,13 +995,25 @@ serverClient = new ServerClient(
             transcript.scrollTop = transcript.scrollHeight;
         },
         onUserText: (text) => {
-            const msg = document.createElement('div');
+            const msgSpan = document.createElement('span');
+            msgSpan.className = 'msg-content msg-user';
             const gNameMatch = document.cookie.match(/(?:^|; )speax_google_name=([^;]*)/);
             const gName = localStorage.getItem('speax_google_name') || (gNameMatch ? decodeURIComponent(gNameMatch[1]) : 'User');
             const uName = userName.value || gName;
-            msg.innerText = `${uName}: ${text}`;
-            transcript.appendChild(msg);
+            msgSpan.innerText = `${uName}: ${text}`;
+            msgSpan.onclick = () => {
+                msgSpan.classList.toggle('collapsed-msg');
+                if (!msgSpan.classList.contains('collapsed-msg')) msgSpan.dataset.manualExpand = 'true';
+                else delete msgSpan.dataset.manualExpand;
+            };
+
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'msg-row';
+            msgDiv.appendChild(msgSpan);
+
+            transcript.appendChild(msgDiv);
             transcript.scrollTop = transcript.scrollHeight;
+            enforceMessageCollapsing();
         },
         onIgnored: () => {
             if (outContext && outContext.state === 'suspended') {
@@ -1247,13 +1316,27 @@ async function startRecording() {
         await inContext.resume();
     }
 
-    let constraints = { audio: true };
+    let constraints = {
+        audio: {
+            noiseSuppression: true,
+            echoCancellation: true,
+            autoGainControl: false // Pulled down filtering slightly
+        }
+    };
     if (currentMicProfile === 'heavy') {
         constraints = {
             audio: {
                 noiseSuppression: true,
                 echoCancellation: true,
                 autoGainControl: true
+            }
+        };
+    } else if (currentMicProfile === 'sensitive') {
+        constraints = {
+            audio: {
+                noiseSuppression: false,
+                echoCancellation: false,
+                autoGainControl: false
             }
         };
     }
@@ -1268,11 +1351,11 @@ async function startRecording() {
 
     let filterNode = null;
     if (currentMicProfile === 'heavy') {
-        filterNode = inContext.createBiquadFilter();
-        filterNode.type = 'highpass';
-        filterNode.frequency.value = 100;
-        input.connect(filterNode);
-        filterNode.connect(duckingNode);
+        const filter = inContext.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.value = 100;
+        input.connect(filter);
+        filter.connect(duckingNode);
     } else {
         input.connect(duckingNode);
     }
@@ -1298,7 +1381,8 @@ async function startRecording() {
         }
         const rms = isMuted ? 0 : Math.sqrt(sum / inputData.length);
 
-        const currentThreshold = currentMicProfile === 'adaptive' ? Math.max(0.005, averageSpeechRms * 0.3) : NOISE_THRESHOLD;
+        let currentThreshold = currentMicProfile === 'adaptive' ? Math.max(0.005, averageSpeechRms * 0.3) : NOISE_THRESHOLD;
+        if (currentMicProfile === 'sensitive') currentThreshold = 0.005; // Lower threshold = more sensitive
 
         if (rms > currentThreshold) {
             // Speech detected
