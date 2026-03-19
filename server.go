@@ -427,6 +427,134 @@ func getOrCreateSession(clientID string) *ClientSession {
 	return s
 }
 
+func getMemoryPath(clientID string) string {
+	safeID := strings.ReplaceAll(clientID, "/", "")
+	safeID = strings.ReplaceAll(safeID, "\\", "")
+	safeID = strings.ReplaceAll(safeID, "..", "")
+	return filepath.Join(".", "context", safeID+"-memory.json")
+}
+
+func getForgottenMemoryPath(clientID string) string {
+	safeID := strings.ReplaceAll(clientID, "/", "")
+	safeID = strings.ReplaceAll(safeID, "\\", "")
+	safeID = strings.ReplaceAll(safeID, "..", "")
+	return filepath.Join(".", "context", safeID+"-forgotten.json")
+}
+
+func loadAlyxMemory(clientID string) map[string]string {
+	memoryPath := getMemoryPath(clientID)
+	// Fallback for migration
+	safeID := strings.ReplaceAll(clientID, "/", "")
+	safeID = strings.ReplaceAll(safeID, "\\", "")
+	safeID = strings.ReplaceAll(safeID, "..", "")
+	oldPath := filepath.Join(".", "context", safeID+"-alyx.json")
+
+	data, err := os.ReadFile(memoryPath)
+	if err != nil {
+		data, err = os.ReadFile(oldPath)
+		if err != nil {
+			return make(map[string]string)
+		}
+	}
+
+	var memMap map[string]string
+	if err := json.Unmarshal(data, &memMap); err != nil {
+		// Try legacy single-string format
+		var oldStruct struct {
+			Memory string `json:"memory"`
+		}
+		if err := json.Unmarshal(data, &oldStruct); err == nil && oldStruct.Memory != "" {
+			memMap = map[string]string{"legacy_memory": oldStruct.Memory}
+		} else {
+			return make(map[string]string)
+		}
+	}
+	return memMap
+}
+
+func saveAlyxMemory(clientID string, key string, content string) error {
+	memMap := loadAlyxMemory(clientID)
+	memMap[key] = content
+	data, err := json.MarshalIndent(memMap, "", "  ")
+	if err != nil {
+		return err
+	}
+	os.MkdirAll(filepath.Join(".", "context"), 0755)
+
+	// Migration cleanup: remove old file if it exists
+	safeID := strings.ReplaceAll(clientID, "/", "")
+	safeID = strings.ReplaceAll(safeID, "\\", "")
+	safeID = strings.ReplaceAll(safeID, "..", "")
+	oldPath := filepath.Join(".", "context", safeID+"-alyx.json")
+	os.Remove(oldPath)
+
+	return os.WriteFile(getMemoryPath(clientID), data, 0644)
+}
+
+func deleteAlyxMemory(clientID string, key string) error {
+	memMap := loadAlyxMemory(clientID)
+	content, exists := memMap[key]
+	if !exists {
+		return fmt.Errorf("memory key '%s' not found", key)
+	}
+
+	delete(memMap, key)
+
+	// Save updated memory
+	data, _ := json.MarshalIndent(memMap, "", "  ")
+	os.WriteFile(getMemoryPath(clientID), data, 0644)
+
+	// Append to forgotten.json
+	forgottenPath := getForgottenMemoryPath(clientID)
+	var forgotten map[string][]map[string]string
+	fData, err := os.ReadFile(forgottenPath)
+	if err == nil {
+		json.Unmarshal(fData, &forgotten)
+	}
+	if forgotten == nil {
+		forgotten = make(map[string][]map[string]string)
+	}
+
+	entry := map[string]string{
+		"content":      content,
+		"forgotten_at": time.Now().Format(time.RFC3339),
+	}
+	forgotten[key] = append(forgotten[key], entry)
+
+	fOut, _ := json.MarshalIndent(forgotten, "", "  ")
+	return os.WriteFile(forgottenPath, fOut, 0644)
+}
+
+const alyxMemoryInstruction = `
+### Internal Tool: AlyxMemory
+You have a special internal tool 'AlyxMemory' with actions 'save' and 'delete'. Use it to persist or remove important information about the user or your interactions that should survive across different conversations. All information you save here will be injected into your system prompt in future sessions under the 'Long-term Memory' section.
+
+To use this tool, output:
+|||TOOL_CALL
+{
+  "toolName": "AlyxMemory",
+  "actionName": "save",
+  "executionId": "m1",
+  "params": {
+    "key": "user_preference_coffee",
+    "content": "The user prefers dark roast with no sugar."
+  }
+}
+|||
+
+Or to delete:
+|||TOOL_CALL
+{
+  "toolName": "AlyxMemory",
+  "actionName": "delete",
+  "executionId": "m2",
+  "params": {
+     "key": "user_preference_coffee"
+  }
+}
+|||
+`
+
 func saveSession(session *ClientSession) {
 	session.Mutex.Lock()
 	defer session.Mutex.Unlock()
@@ -901,28 +1029,39 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			if strings.HasPrefix(text, "[TYPED_PROMPT]") || strings.HasPrefix(text, "[TEXT_PROMPT]") {
-				isTyped := strings.HasPrefix(text, "[TYPED_PROMPT]")
-				prefix := "[TEXT_PROMPT]"
-				if isTyped {
-					prefix = "[TYPED_PROMPT]"
-				}
-				prompt := strings.TrimSpace(strings.TrimPrefix(text, prefix))
-				if strings.HasPrefix(prompt, ":") {
-					prompt = strings.TrimSpace(strings.TrimPrefix(prompt, ":"))
+			if strings.HasPrefix(text, "[TYPED_PROMPT") || strings.HasPrefix(text, "[TEXT_PROMPT") {
+				closeIdx := strings.Index(text, "]")
+				if closeIdx == -1 {
+					goto skipPrompt
 				}
 				
+				isTyped := strings.HasPrefix(text, "[TYPED_PROMPT")
+				tagContent := text[1:closeIdx]
+				prompt := strings.TrimSpace(text[closeIdx+1:])
+				if strings.HasPrefix(prompt, ":") {
+					prompt = strings.TrimSpace(prompt[1:])
+				}
+
 				if prompt != "" {
 					baseTime := time.Now()
 					content := prompt
-					
-					// Support [TEXT_PROMPT:TIMESTAMP]:Content
-					if strings.HasPrefix(prompt, "[") {
-						if closeIdx := strings.Index(prompt, "]:"); closeIdx != -1 {
-							tsStr := strings.Trim(prompt[1:closeIdx], " ")
+
+					// Extract timestamp from tag if present: [TYPED_PROMPT:123456789]
+					if strings.Contains(tagContent, ":") {
+						parts := strings.SplitN(tagContent, ":", 2)
+						tsStr := strings.TrimSpace(parts[1])
+						if ts, err := strconv.ParseInt(tsStr, 10, 64); err == nil {
+							baseTime = time.Unix(0, ts*int64(time.Millisecond))
+						}
+					}
+
+					// Also support legacy [TEXT_PROMPT:TIMESTAMP]:Content if someone still uses it
+					if strings.HasPrefix(content, "[") {
+						if cId := strings.Index(content, "]:"); cId != -1 {
+							tsStr := strings.Trim(content[1:cId], " ")
 							if ts, err := strconv.ParseInt(tsStr, 10, 64); err == nil {
 								baseTime = time.Unix(0, ts*int64(time.Millisecond))
-								content = strings.TrimSpace(prompt[closeIdx+2:])
+								content = strings.TrimSpace(content[cId+2:])
 							}
 						}
 					}
@@ -932,7 +1071,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					if shouldProcess {
 						if isTyped {
 							session.Mutex.Lock()
-							session.LastActiveTime = time.Now() // Manual override resets the window
+							session.LastActiveTime = time.Now()
 							session.Mutex.Unlock()
 							log.Printf("[RUMBLE] Manual typed prompt received. Forcing Passive Assistant into Active mode.")
 						}
@@ -945,20 +1084,19 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 							session.ActiveCancel = cancel
 							session.Mutex.Unlock()
 	
-							// Echo it back to client so it appears in chat immediately
-							// Note: Prefixing with [CHAT]: to distinguish from raw transcription echos
 							sendOrBroadcastText(nil, session, []byte("[CHAT]:"+p))
 							
 							log.Printf("[LLM] Processing text prompt: '%s' (isTyped=%v, Start=%v)", p, isTyped, bt.Format("15:04:05.000"))
 							if err := streamLLMAndTTS(ctx, p, ws, session); err != nil {
 								log.Println("LLM stream error:", err)
 							}
-							log.Println("[LLM] Stream complete (Text Prompt).")
 						}(content, baseTime)
 					}
 				}
 				continue
 			}
+
+		skipPrompt:
 
 			if text == "[PLAYBACK_COMPLETE]" {
 				session.Mutex.Lock()
@@ -1268,6 +1406,16 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		sysContent += "\n\n" + toolPrompt
 	}
 
+	// Long-term Memory
+	sysContent += alyxMemoryInstruction
+	if memoryMap := loadAlyxMemory(session.ClientID); len(memoryMap) > 0 {
+		sysContent += "\n### Long-term Memory\n"
+		for k, v := range memoryMap {
+			sysContent += fmt.Sprintf("- %s: %s\n", k, v)
+		}
+		sysContent += "\n"
+	}
+
 	t := session.ActiveThread()
 	if t.Summary != "" {
 		sysContent += "\n\nContext from earlier in the conversation: " + t.Summary
@@ -1470,6 +1618,38 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			}
 			if err := json.Unmarshal([]byte(jsonStr), &toolCall); err == nil {
 				log.Printf("Intercepted complete tool call for %s.%s", toolCall.ToolName, toolCall.ActionName)
+
+				if toolCall.ToolName == "AlyxMemory" {
+					params, _ := toolCall.Params.(map[string]interface{})
+					var err error
+					var statusMsg string
+
+					if toolCall.ActionName == "save" {
+						key, _ := params["key"].(string)
+						content, _ := params["content"].(string)
+						if key == "" { // Fallback for old AI versions
+							content, _ = params["memory"].(string)
+							key = "legacy_info"
+						}
+						err = saveAlyxMemory(session.ClientID, key, content)
+						statusMsg = "Memory saved successfully."
+					} else if toolCall.ActionName == "delete" {
+						key, _ := params["key"].(string)
+						err = deleteAlyxMemory(session.ClientID, key)
+						statusMsg = "Memory deleted successfully."
+					}
+
+					session.Mutex.Lock()
+					var result string
+					if err != nil {
+						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"error\": \"%v\"}", toolCall.ActionName, toolCall.ExecutionId, err)
+					} else {
+						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"status\": \"success\", \"message\": \"%s\"}", toolCall.ActionName, toolCall.ExecutionId, statusMsg)
+					}
+					session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: result})
+					session.Mutex.Unlock()
+					return
+				}
 				executePayload, _ := json.Marshal(toolCall)
 				err := targetToolClient(session, toolCall.ToolName, []byte("[TOOL_EXECUTE]"+string(executePayload)))
 				if err != nil {
@@ -1705,6 +1885,16 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
 	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
 
+	// Long-term Memory
+	sysContent += alyxMemoryInstruction
+	if memoryMap := loadAlyxMemory(session.ClientID); len(memoryMap) > 0 {
+		sysContent += "\n### Long-term Memory\n"
+		for k, v := range memoryMap {
+			sysContent += fmt.Sprintf("- %s: %s\n", k, v)
+		}
+		sysContent += "\n"
+	}
+
 	// Tool call syntax is too complex for offline Ollama models — skip it entirely.
 
 	t := session.ActiveThread()
@@ -1880,6 +2070,38 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			}
 			if err := json.Unmarshal([]byte(jsonStr), &toolCall); err == nil {
 				log.Printf("Intercepted complete tool call for %s.%s", toolCall.ToolName, toolCall.ActionName)
+
+				if toolCall.ToolName == "AlyxMemory" {
+					params, _ := toolCall.Params.(map[string]interface{})
+					var err error
+					var statusMsg string
+
+					if toolCall.ActionName == "save" {
+						key, _ := params["key"].(string)
+						content, _ := params["content"].(string)
+						if key == "" { // Fallback for old AI versions that might still try to use the old format
+							content, _ = params["memory"].(string)
+							key = "legacy_info"
+						}
+						err = saveAlyxMemory(session.ClientID, key, content)
+						statusMsg = "Memory saved successfully."
+					} else if toolCall.ActionName == "delete" {
+						key, _ := params["key"].(string)
+						err = deleteAlyxMemory(session.ClientID, key)
+						statusMsg = "Memory deleted successfully."
+					}
+
+					session.Mutex.Lock()
+					var result string
+					if err != nil {
+						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"error\": \"%v\"}", toolCall.ActionName, toolCall.ExecutionId, err)
+					} else {
+						result = fmt.Sprintf("[TOOL_RESULT from AlyxMemory.%s (id: %s)]:\n{\"status\": \"success\", \"message\": \"%s\"}", toolCall.ActionName, toolCall.ExecutionId, statusMsg)
+					}
+					session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: result})
+					session.Mutex.Unlock()
+					return
+				}
 				executePayload, _ := json.Marshal(toolCall)
 				err := targetToolClient(session, toolCall.ToolName, []byte("[TOOL_EXECUTE]"+string(executePayload)))
 				if err != nil {
