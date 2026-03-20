@@ -238,9 +238,10 @@ type ClientSession struct {
 	Conns         map[*websocket.Conn]ConnMeta `json:"-"`
 	Tools         map[string]*Tool             `json:"-"` // Map tool name to connected tool
 	// Streaming Audio State
-	StreamingBuffer []byte     `json:"-"`
-	ActiveSeqID     uint64     `json:"-"`
-	BufferMutex     sync.Mutex `json:"-"`
+	StreamingBuffer    []byte     `json:"-"`
+	StreamingStartTime time.Time  `json:"-"`
+	ActiveSeqID        int64      `json:"-"`
+	BufferMutex        sync.Mutex `json:"-"`
 	TurnMutex         sync.Mutex                   `json:"-"` // Serializes AI responses/turns
 	ActiveCancel      context.CancelFunc           `json:"-"` // Global interrupt control
 	ToolDebounceTimer *time.Timer                  `json:"-"` // Debounces AI response after tool results
@@ -1261,9 +1262,10 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 	defer session.BufferMutex.Unlock()
 
 	// Reset if sequence changes (prevents interleaving/orphaned buffers)
-	if session.ActiveSeqID != seqID {
-		session.StreamingBuffer = nil
-		session.ActiveSeqID = seqID
+	if session.ActiveSeqID != int64(seqID) {
+		session.ActiveSeqID = int64(seqID)
+		session.StreamingBuffer = nil // Reset on new sequence
+		session.StreamingStartTime = time.Now()
 	}
 
 	if packetType == 0x01 { // STREAM
@@ -1286,16 +1288,51 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio [
 	}
 	log.Printf("[STT-Stream] Final Whisper Transcribed: '%s'", text)
 
-	session.Mutex.Lock()
-	if session.ActiveCancel != nil {
-		session.ActiveCancel()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	session.ActiveCancel = cancel
-	session.Mutex.Unlock()
+	text = strings.TrimSpace(strings.ReplaceAll(text, "[BLANK_AUDIO]", ""))
 
-	sendOrBroadcastText(nil, session, []byte("[CHAT]:"+text))
-	streamLLMAndTTS(ctx, text, ws, session)
+	// Filter out Whisper artifacts like [ "..." ] or ( music )
+	isNonResponse := (strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]")) ||
+		(strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")"))
+
+	// Aggressively suppress common hallucinated "polite" closers
+	cleanerText := strings.ToLower(strings.Trim(text, ".,! "))
+	isHallucination := cleanerText == "thank you" ||
+		cleanerText == "thank you." ||
+		cleanerText == "thank you.\nthank you." ||
+		cleanerText == "thank you.\nthank you" ||
+		cleanerText == "thank you. thank you" ||
+		cleanerText == "bye" ||
+		cleanerText == "bye." ||
+		cleanerText == "goodbye" ||
+		cleanerText == "goodbye."
+
+	if isHallucination {
+		isNonResponse = true
+	}
+
+	if isNonResponse {
+		clientText := strings.Replace(text, "[", "(", 1)
+		clientText = strings.Replace(clientText, "]", ")", 1)
+		log.Printf("[STT-Stream] Filtered Whisper artifact, sending to client: %s", clientText)
+		safeWrite(ws, session, websocket.TextMessage, []byte(clientText))
+	} else if text != "" && shouldProcessPrompt(session, text, session.StreamingStartTime) {
+		session.Mutex.Lock()
+		if session.ActiveCancel != nil {
+			session.ActiveCancel()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		session.ActiveCancel = cancel
+		session.Mutex.Unlock()
+
+		sendOrBroadcastText(nil, session, []byte("[CHAT]:"+text))
+
+		if err := streamLLMAndTTS(ctx, text, ws, session); err != nil {
+			log.Println("LLM stream error:", err)
+		}
+		log.Println("[LLM-Stream] Stream complete.")
+	} else {
+		safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
+	}
 }
 
 func addWavHeader(pcmData []byte) []byte {

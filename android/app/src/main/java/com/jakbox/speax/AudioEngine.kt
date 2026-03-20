@@ -20,7 +20,8 @@ class AudioEngine(
     private val onSpeechStart: () -> Unit = {},
     private val onAiVolumeChange: (Float) -> Unit = {},
     private val onBufferProgress: (Float) -> Unit = {},
-    private val onPlaybackComplete: () -> Unit = {}
+    private val onPlaybackComplete: () -> Unit = {},
+    private val onStreamingChunk: (ByteArray, Long, Byte) -> Unit = { _, _, _ -> }
 ) {
 
     private val sampleRate = 16000
@@ -45,6 +46,13 @@ class AudioEngine(
     private var totalWrittenFrames = 0
     private val rmsQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<Int, Float>>()
     private var speechStartTime = 0L
+    
+    // Streaming state
+    @Volatile private var isStreamActive = false
+    @Volatile private var currentSeqID = 0L
+    private var lastStreamingSendTime = 0L
+    private val audioChunks = mutableListOf<ShortArray>()
+    private val streamingLock = Any()
 
     // VAD Constants
     // 500.0 matches the 0.015 float threshold from the PWA (0.015 * 32768 ≈ 491.5)
@@ -54,6 +62,7 @@ class AudioEngine(
     private val MIN_CHUNKS = 16 // 16 frames * 1024 bytes = ~16,384 bytes minimum for Whisper
     private val FRAME_SIZE = 512 // 512 shorts (1024 bytes) = 32ms audio chunks for silky smooth UI
     private val GAIN_MULTIPLIER = 1.0f // Software boost to counteract VOICE_COMMUNICATION AGC
+    private val STREAMING_INTERVAL = 1500L
 
     @SuppressLint("MissingPermission")
     fun startRecording() {
@@ -93,7 +102,6 @@ class AudioEngine(
             val buffer = ShortArray(FRAME_SIZE)
             var isSpeaking = false
             var silenceFrames = 0
-            val audioChunks = mutableListOf<ShortArray>()
             val preRollBuffer = mutableListOf<ShortArray>()
 
             while (!Thread.currentThread().isInterrupted) {
@@ -140,27 +148,7 @@ class AudioEngine(
                         if (isSpeaking) {
                             isSpeaking = false
                             silenceFrames = 0
-                            if (audioChunks.size >= MIN_CHUNKS) {
-                                var sumSquares = 0.0
-                                var totalSamples = 0
-                                // Flatten short arrays to byte array for WebSocket
-                                val byteBuffer = java.nio.ByteBuffer.allocate(audioChunks.sumOf { it.size } * 2)
-                                byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                for (chunk in audioChunks) {
-                                    for (sample in chunk) {
-                                        byteBuffer.putShort(sample)
-                                        sumSquares += sample.toDouble() * sample.toDouble()
-                                        totalSamples++
-                                    }
-                                }
-                                if (totalSamples > 0) {
-                                    val chunkRms = sqrt(sumSquares / totalSamples)
-                                    averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms)
-                                }
-                                Log.d("AudioEngine", "Speech finalized due to mute, sending ${byteBuffer.capacity()} bytes")
-                                onSpeechFinalized(byteBuffer.array(), speechStartTime)
-                            }
-                            audioChunks.clear()
+                            forceEndStreaming()
                         }
                         preRollBuffer.add(buffer.copyOf(readResult))
                         if (preRollBuffer.size > PRE_ROLL_FRAMES) preRollBuffer.removeAt(0)
@@ -171,50 +159,55 @@ class AudioEngine(
                         if (!isSpeaking) {
                             Log.d("AudioEngine", "Speech detected! Suspending playback instantly.")
                             isSpeaking = true
+
+                            synchronized(streamingLock) {
+                                isStreamActive = true
+                                currentSeqID = System.currentTimeMillis()
+                                lastStreamingSendTime = currentSeqID
+                                audioChunks.clear()
+                                audioChunks.addAll(preRollBuffer)
+                            }
+
                             speechStartTime = System.currentTimeMillis()
                             suspendPlayback() // Match PWA: Instant pause on interruption
                             onSpeechStart()
-                            audioChunks.addAll(preRollBuffer) // Prepend pre-roll
                             preRollBuffer.clear() // Clear it so we don't accidentally duplicate on rapid VAD toggles
                         }
                         silenceFrames = 0
-                        audioChunks.add(buffer.copyOf(readResult))
+                        synchronized(streamingLock) {
+                            audioChunks.add(buffer.copyOf(readResult))
+                        }
                     } else if (isSpeaking) {
-                        audioChunks.add(buffer.copyOf(readResult)) // Keep trailing silence
+                        synchronized(streamingLock) {
+                            audioChunks.add(buffer.copyOf(readResult)) // Keep trailing silence
+                        }
                         silenceFrames++
                         if (silenceFrames >= SILENCE_FRAMES_LIMIT) {
                             isSpeaking = false
                             silenceFrames = 0
-                            
-                            if (audioChunks.size >= MIN_CHUNKS) {
-                                var sumSquares = 0.0
-                                var totalSamples = 0
-                                // Flatten short arrays to byte array for WebSocket
-                                val byteBuffer = java.nio.ByteBuffer.allocate(audioChunks.sumOf { it.size } * 2)
-                                byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                for (chunk in audioChunks) {
-                                    for (sample in chunk) {
-                                        byteBuffer.putShort(sample)
-                                        sumSquares += sample.toDouble() * sample.toDouble()
-                                        totalSamples++
-                                    }
-                                }
-                                if (totalSamples > 0) {
-                                    val chunkRms = sqrt(sumSquares / totalSamples)
-                                    averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms)
-                                }
-                                Log.d("AudioEngine", "Speech finalized, sending ${byteBuffer.capacity()} bytes")
-                                onSpeechFinalized(byteBuffer.array(), speechStartTime)
-                            } else {
-                                Log.d("AudioEngine", "Speech discarded (too short)")
-                            }
-                            audioChunks.clear()
+                            forceEndStreaming()
                         }
                     } else {
                         // Not speaking, maintain rolling pre-roll
                         preRollBuffer.add(buffer.copyOf(readResult))
                         if (preRollBuffer.size > PRE_ROLL_FRAMES) {
                             preRollBuffer.removeAt(0)
+                        }
+                    }
+
+                    // Streaming Periodic Send
+                    if (isStreamActive) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastStreamingSendTime >= STREAMING_INTERVAL) {
+                            val pcmData: ByteArray
+                            var seqID: Long
+                            synchronized(streamingLock) {
+                                pcmData = flattenChunks(audioChunks)
+                                audioChunks.clear()
+                                seqID = currentSeqID
+                                lastStreamingSendTime = now
+                            }
+                            onStreamingChunk(pcmData, seqID, 0x01.toByte()) // 0x01: STREAM
                         }
                     }
                 }
@@ -224,6 +217,7 @@ class AudioEngine(
     }
 
     fun stopRecording() {
+        forceEndStreaming()
         recordingThread?.interrupt()
         recordingThread = null
         audioRecord?.stop()
@@ -238,6 +232,43 @@ class AudioEngine(
         
         autoGainControl?.release()
         autoGainControl = null
+    }
+
+    fun forceEndStreaming() {
+        if (!isStreamActive) return
+        val pcmData: ByteArray
+        var seqID: Long
+        synchronized(streamingLock) {
+            if (!isStreamActive) return
+            pcmData = flattenChunks(audioChunks)
+            audioChunks.clear()
+            seqID = currentSeqID
+            isStreamActive = false
+        }
+        Log.d("AudioEngine", "Forcing end of streaming session, sending final ${pcmData.size} bytes")
+        onStreamingChunk(pcmData, seqID, 0x02.toByte()) // 0x02: END
+    }
+
+    private fun flattenChunks(chunks: List<ShortArray>): ByteArray {
+        val totalSamples = chunks.sumOf { it.size }
+        val byteBuffer = java.nio.ByteBuffer.allocate(totalSamples * 2)
+        byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        
+        var sumSquares = 0.0
+        for (chunk in chunks) {
+            for (sample in chunk) {
+                byteBuffer.putShort(sample)
+                sumSquares += sample.toDouble() * sample.toDouble()
+            }
+        }
+        
+        // Update adaptive baseline for VAD if this is the final finalization
+        if (totalSamples > 0) {
+            val chunkRms = sqrt(sumSquares / totalSamples)
+            averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms)
+        }
+        
+        return byteBuffer.array()
     }
 
     fun playAudioChunk(pcmData: ByteArray, pcmSampleRate: Int = 22050) {

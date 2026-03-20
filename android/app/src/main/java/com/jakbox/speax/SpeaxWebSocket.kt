@@ -73,6 +73,19 @@ class SpeaxWebSocket(
         }
     }
 
+    fun sendStreamingChunk(type: Byte, seqID: Long, pcmData: ByteArray) {
+        GlobalScope.launch(Dispatchers.IO) {
+            val buffer = java.nio.ByteBuffer.allocate(2 + 8 + pcmData.size)
+                .order(java.nio.ByteOrder.BIG_ENDIAN)
+            buffer.put(0xFF.toByte())      // Magic byte
+            buffer.put(type)               // 0x01: STREAM, 0x02: END
+            buffer.putLong(seqID)          // BigInt(timestamp)
+            buffer.put(pcmData)            // RAW PCM
+            
+            webSocket?.send(buffer.array().toByteString())
+        }
+    }
+
     fun disconnect() {
         webSocket?.close(1000, "User disconnected")
         webSocket = null

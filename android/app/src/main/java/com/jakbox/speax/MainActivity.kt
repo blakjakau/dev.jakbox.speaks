@@ -197,10 +197,7 @@ class MainActivity : ComponentActivity() {
         }
 
         // 1. Initialize Audio Engine
-        audioEngine = AudioEngine(onSpeechFinalized = { pcmData, startTime ->
-            speaxWebSocket?.sendAudio(pcmData, startTime)
-            runOnUiThread { statusText = "Processing with AI..." }
-        }, onVolumeChange = { rms ->
+        audioEngine = AudioEngine(onSpeechFinalized = { _, _ -> }, onVolumeChange = { rms ->
             // Pass RMS back to UI thread for Visualizer scaling
             if (isAppInForeground) runOnUiThread { currentRms = rms }
         }, onSpeechStart = {
@@ -212,6 +209,11 @@ class MainActivity : ComponentActivity() {
             if (isAppInForeground) runOnUiThread { playbackProgress = progress }
         }, onPlaybackComplete = {
             speaxWebSocket?.sendText("[PLAYBACK_COMPLETE]")
+        }, onStreamingChunk = { pcmData, seqID, type ->
+            speaxWebSocket?.sendStreamingChunk(type, seqID, pcmData)
+            if (type == 0x02.toByte()) {
+                runOnUiThread { statusText = "Processing with AI..." }
+            }
         })
         audioEngine.micProfile = micProfile
 
@@ -980,6 +982,7 @@ class MainActivity : ComponentActivity() {
             }
         } else {
             audioEngine.isMicMuted = isMicMuted
+            if (isMicMuted) audioEngine.forceEndStreaming()
         }
         
         updateBackgroundService()
@@ -992,6 +995,7 @@ class MainActivity : ComponentActivity() {
             audioEngine.suspendPlayback()
             isMicMuted = true
             audioEngine.isMicMuted = true
+            audioEngine.forceEndStreaming()
             if (useNativeStt) stopNativeListening()
         } else {
             audioEngine.resumePlayback()
