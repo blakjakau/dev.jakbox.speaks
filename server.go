@@ -238,16 +238,16 @@ type ClientSession struct {
 	Conns         map[*websocket.Conn]ConnMeta `json:"-"`
 	Tools         map[string]*Tool             `json:"-"` // Map tool name to connected tool
 	// Streaming Audio State
-	StreamingBuffer    []byte     `json:"-"`
-	StreamingStartTime time.Time  `json:"-"`
-	ActiveSeqID        int64      `json:"-"`
-	BufferMutex        sync.Mutex `json:"-"`
-	TurnMutex         sync.Mutex                   `json:"-"` // Serializes AI responses/turns
-	ActiveCancel      context.CancelFunc           `json:"-"` // Global interrupt control
-	ToolDebounceTimer *time.Timer                  `json:"-"` // Debounces AI response after tool results
-	PassiveAssistant  bool                         `json:"passiveAssistant"`
-	LastActiveTime    time.Time                    `json:"-"`
-	LastActiveConn    *websocket.Conn              `json:"-"` // Tracks the last client to send input (text/audio)
+	StreamingBuffer    []byte             `json:"-"`
+	StreamingStartTime time.Time          `json:"-"`
+	ActiveSeqID        int64              `json:"-"`
+	BufferMutex        sync.Mutex         `json:"-"`
+	TurnMutex          sync.Mutex         `json:"-"` // Serializes AI responses/turns
+	ActiveCancel       context.CancelFunc `json:"-"` // Global interrupt control
+	ToolDebounceTimer  *time.Timer        `json:"-"` // Debounces AI response after tool results
+	PassiveAssistant   bool               `json:"passiveAssistant"`
+	LastActiveTime     time.Time          `json:"-"`
+	LastActiveConn     *websocket.Conn    `json:"-"` // Tracks the last client to send input (text/audio)
 }
 
 func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Time) bool {
@@ -641,9 +641,9 @@ func sendSummary(ws *websocket.Conn, session *ClientSession) {
 func sendSettings(ws *websocket.Conn, session *ClientSession) {
 	session.Mutex.Lock()
 	settingsJSON, err := json.Marshal(map[string]interface{}{
-		"userName":      session.UserName,
-		"googleName":    session.GoogleName,
-		"userBio":       session.UserBio,
+		"userName":         session.UserName,
+		"googleName":       session.GoogleName,
+		"userBio":          session.UserBio,
 		"provider":         session.Provider,
 		"apiKey":           session.APIKey,
 		"model":            session.Model,
@@ -858,9 +858,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 					session.ToolDebounceTimer = time.AfterFunc(2*time.Second, func() {
 						log.Printf("[LLM] Debounce timer expired for %s, triggering auto-resume.", session.ClientID)
-						
+
 						ctx, cancel := context.WithCancel(context.Background())
-						
+
 						session.Mutex.Lock()
 						session.ActiveCancel = cancel
 						session.Mutex.Unlock()
@@ -990,11 +990,11 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 			if strings.HasPrefix(text, "[SETTINGS]") {
 				var settings struct {
-					UserName      string `json:"userName"`
-					GoogleName    string `json:"googleName"`
-					UserBio       string `json:"userBio"`
-					Provider      string `json:"provider"`
-					APIKey        string `json:"apiKey"`
+					UserName         string `json:"userName"`
+					GoogleName       string `json:"googleName"`
+					UserBio          string `json:"userBio"`
+					Provider         string `json:"provider"`
+					APIKey           string `json:"apiKey"`
 					Model            string `json:"model"`
 					Voice            string `json:"voice"`
 					ClientStorage    bool   `json:"clientStorage"`
@@ -1040,7 +1040,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				if closeIdx == -1 {
 					goto skipPrompt
 				}
-				
+
 				isTyped := strings.HasPrefix(text, "[TYPED_PROMPT")
 				tagContent := text[1:closeIdx]
 				prompt := strings.TrimSpace(text[closeIdx+1:])
@@ -1073,7 +1073,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					}
 
 					shouldProcess := isTyped || shouldProcessPrompt(session, content, baseTime)
-					
+
 					if shouldProcess {
 						if isTyped {
 							session.Mutex.Lock()
@@ -1089,9 +1089,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 							ctx, cancel := context.WithCancel(context.Background())
 							session.ActiveCancel = cancel
 							session.Mutex.Unlock()
-	
+
 							sendOrBroadcastText(nil, session, []byte("[CHAT]:"+p))
-							
+
 							log.Printf("[LLM] Processing text prompt: '%s' (isTyped=%v, Start=%v)", p, isTyped, bt.Format("15:04:05.000"))
 							if err := streamLLMAndTTS(ctx, p, ws, session); err != nil {
 								log.Println("LLM stream error:", err)
@@ -1275,7 +1275,7 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 		fullBuffer := session.StreamingBuffer
 		session.StreamingBuffer = nil
 		session.ActiveSeqID = 0
-		
+
 		go processStreamingWhisper(ws, session, fullBuffer)
 	}
 }
@@ -1344,16 +1344,16 @@ func addWavHeader(pcmData []byte) []byte {
 	// fmt chunk
 	buf.Write([]byte("fmt "))
 	binary.Write(buf, binary.LittleEndian, uint32(16))
-	binary.Write(buf, binary.LittleEndian, uint16(1))     // AudioFormat: PCM
-	binary.Write(buf, binary.LittleEndian, uint16(1))     // NumChannels: Mono
+	binary.Write(buf, binary.LittleEndian, uint16(1)) // AudioFormat: PCM
+	binary.Write(buf, binary.LittleEndian, uint16(1)) // NumChannels: Mono
 	configMutex.RLock()
 	sampleRate := config.SampleRate
 	configMutex.RUnlock()
 
-	binary.Write(buf, binary.LittleEndian, uint32(sampleRate)) // SampleRate: e.g. 16kHz
+	binary.Write(buf, binary.LittleEndian, uint32(sampleRate))   // SampleRate: e.g. 16kHz
 	binary.Write(buf, binary.LittleEndian, uint32(sampleRate*2)) // ByteRate: SampleRate * NumChannels * BitsPerSample/8
-	binary.Write(buf, binary.LittleEndian, uint16(2))     // BlockAlign: NumChannels * BitsPerSample/8
-	binary.Write(buf, binary.LittleEndian, uint16(16))    // BitsPerSample: 16
+	binary.Write(buf, binary.LittleEndian, uint16(2))            // BlockAlign: NumChannels * BitsPerSample/8
+	binary.Write(buf, binary.LittleEndian, uint16(16))           // BitsPerSample: 16
 	// data chunk
 	buf.Write([]byte("data"))
 	binary.Write(buf, binary.LittleEndian, uint32(len(pcmData)))
@@ -1752,7 +1752,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					session.ToolDebounceTimer = time.AfterFunc(2*time.Second, func() {
 						log.Printf("[LLM] Debounce timer expired for AlyxMemory, triggering auto-resume.")
 						ctx, cancel := context.WithCancel(context.Background())
-						
+
 						session.Mutex.Lock()
 						session.ActiveCancel = cancel
 						session.Mutex.Unlock()
@@ -1810,7 +1810,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					// We append new incoming chunk content to our working string.
 					// If we're inside a tool block, we append to toolBlockBuffer.
 					// If we're outside a tool block, we append to pendingBuffer.
-					
+
 					var processStr string
 					if inToolBlock {
 						toolBlockBuffer.WriteString(content)
@@ -1828,26 +1828,26 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 							if strings.HasPrefix(processStr, "|||TOOL_CALL") {
 								searchStart = len("|||TOOL_CALL")
 							}
-							
+
 							closeIdx := strings.Index(processStr[searchStart:], "|||")
-							
+
 							if closeIdx != -1 { // Found the close delimiter!
 								closeIdx += searchStart
 								fullBlock := processStr[:closeIdx+3] // Include the closing "|||"
 								handleToolBlock(fullBlock)
-								
+
 								// Transition out of the tool block
 								inToolBlock = false
 								toolBlockBuffer.Reset()
-								
+
 								// The remaining text after "|||" needs to be processed
 								// by the NORMAL text loop.
 								processStr = processStr[closeIdx+3:]
-								
+
 								// Dump the remainder into our pending buffer as if it just arrived
 								pendingBuffer.Reset()
 								pendingBuffer.WriteString(processStr)
-								
+
 							} else {
 								// No closing delimiter found yet. Stop processing and wait for more chunks.
 								// We already wrote this to toolBlockBuffer at the top of the loop.
@@ -1859,26 +1859,26 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 						} else {
 							// We are accumulating normal text. Look for tool START delimiter
 							toolIdx := strings.Index(processStr, "|||TOOL_CALL")
-							
+
 							if toolIdx != -1 {
 								// We found a start delimiter.
 								// Flush all normal text *before* the delimiter to TTS
 								flushPendingText(processStr[:toolIdx])
-								
+
 								// Now we are inside a tool block.
 								inToolBlock = true
 								pendingBuffer.Reset() // Clear pending buffer since we flushed
-								
+
 								// Feed the rest (including "|||TOOL_CALL") into the tool block logic
 								processStr = processStr[toolIdx:]
 								toolBlockBuffer.Reset()
 								toolBlockBuffer.WriteString(processStr)
-								
+
 								// Continue the loop to immediately see if the close block is also in here!
 								continue
 							}
-							
-							// No complete |||TOOL_CALL found. 
+
+							// No complete |||TOOL_CALL found.
 							// Check if the tail could be a partial delimiter (e.g. ends with "|||T").
 							safeEnd := len(processStr)
 							marker := "|||TOOL_CALL"
@@ -1891,7 +1891,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 							// Flush everything that is definitively safe normal text
 							flushPendingText(processStr[:safeEnd])
-							
+
 							// Whatever is left (the partial delimiter, or nothing) stays in pending
 							processStr = processStr[safeEnd:]
 							pendingBuffer.Reset()
@@ -1899,7 +1899,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 							break
 						}
 					}
-					
+
 					// Trigger TTS processing on complete sentences
 					if !inToolBlock {
 						processTTSSentence()
@@ -2015,7 +2015,6 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	if t.Summary != "" {
 		sysContent += "\n\nContext from earlier in the conversation: " + t.Summary
 	}
-
 
 	messages := []ChatMessage{
 		{Role: "system", Content: sysContent},
@@ -2223,7 +2222,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					session.ToolDebounceTimer = time.AfterFunc(2*time.Second, func() {
 						log.Printf("[LLM] Debounce timer expired for AlyxMemory, triggering auto-resume.")
 						ctx, cancel := context.WithCancel(context.Background())
-						
+
 						session.Mutex.Lock()
 						session.ActiveCancel = cancel
 						session.Mutex.Unlock()
@@ -2286,22 +2285,22 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				if strings.HasPrefix(processStr, "|||TOOL_CALL") {
 					searchStart = len("|||TOOL_CALL")
 				}
-				
+
 				closeIdx := strings.Index(processStr[searchStart:], "|||")
-				
+
 				if closeIdx != -1 {
 					closeIdx += searchStart
 					fullBlock := processStr[:closeIdx+3]
 					handleToolBlock(fullBlock)
-					
+
 					inToolBlock = false
 					toolBlockBuffer.Reset()
-					
+
 					processStr = processStr[closeIdx+3:]
-					
+
 					pendingBuffer.Reset()
 					pendingBuffer.WriteString(processStr)
-					
+
 				} else {
 					toolBlockBuffer.Reset()
 					toolBlockBuffer.WriteString(processStr)
@@ -2309,20 +2308,20 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				}
 			} else {
 				toolIdx := strings.Index(processStr, "|||TOOL_CALL")
-				
+
 				if toolIdx != -1 {
 					flushPendingText(processStr[:toolIdx])
-					
+
 					inToolBlock = true
 					pendingBuffer.Reset()
-					
+
 					processStr = processStr[toolIdx:]
 					toolBlockBuffer.Reset()
 					toolBlockBuffer.WriteString(processStr)
-					
+
 					continue
 				}
-				
+
 				safeEnd := len(processStr)
 				marker := "|||TOOL_CALL"
 				for i := len(marker); i >= 1; i-- {
@@ -2333,7 +2332,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				}
 
 				flushPendingText(processStr[:safeEnd])
-				
+
 				processStr = processStr[safeEnd:]
 				pendingBuffer.Reset()
 				pendingBuffer.WriteString(processStr)

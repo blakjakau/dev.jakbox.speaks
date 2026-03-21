@@ -1400,12 +1400,12 @@ function sendStreamingChunk(packetType) {
     // Atomically swap the buffer
     const activeData = audioChunks;
     audioChunks = [];
-    
+
     if (activeData.length === 0 && packetType === 0x01) return;
 
     const totalSamples = activeData.reduce((acc, val) => acc + val.length, 0);
     const pcmData = new Int16Array(totalSamples);
-    
+
     let offset = 0;
     for (const chunk of activeData) {
         for (let i = 0; i < chunk.length; i++) {
