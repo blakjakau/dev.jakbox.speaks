@@ -36,6 +36,7 @@
             border-bottom: 1px solid var(--outline);
             cursor: pointer;
             font-size: 0.9rem;
+            transition: all 0.2s;
         }
         .history-item:hover { background: var(--surface-variant); }
         .history-item.active { border-left: 3px solid var(--primary); background: var(--glass); }
@@ -150,7 +151,13 @@
             searchHistory.forEach((h, i) => {
                 const div = document.createElement('div');
                 div.className = 'history-item';
-                div.textContent = h.query;
+                const timeStr = new Date(h.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                div.innerHTML = `
+                    <div style="font-weight: 600;">${h.query}</div>
+                    <div style="font-size: 0.75rem; color: var(--on-surface-medium); margin-top: 2px;">
+                        ${timeStr} • ${h.results.length} results
+                    </div>
+                `;
                 div.onclick = () => showResults(i);
                 historyList.appendChild(div);
             });
@@ -159,6 +166,9 @@
         function showResults(index) {
             const h = searchHistory[index];
             if (!h) return;
+            // Mark as active in history panel
+            Array.from(historyList.children).forEach((child, i) => child.classList.toggle('active', i === index));
+            
             resultsList.innerHTML = h.results.map(res => `
                 <div class="search-result">
                     <div class="result-title"><a href="${res.url}" target="_blank" style="color: inherit; text-decoration: none;">${res.title}</a></div>
@@ -173,7 +183,8 @@
             try {
                 const results = await activeProvider.search(query);
                 const item = { query, timestamp: Date.now(), results };
-                searchHistory = [item, ...searchHistory.filter(h => h.query !== query)].slice(0, 20);
+                searchHistory = [item, ...searchHistory.filter(h => h.query !== query)];
+                cleanupExpiredHistory();
                 localStorage.setItem('speax_search_history', JSON.stringify(searchHistory));
                 renderHistory();
                 showResults(0);
@@ -182,6 +193,34 @@
                 logger.log(`Error: ${err.message}`, 'error');
             }
         }
+
+        function cleanupExpiredHistory() {
+            const now = Date.now();
+            const originalLength = searchHistory.length;
+            
+            searchHistory = searchHistory.filter((item, index) => {
+                // Staggered retention policy:
+                // First 6: 48h (most recent)
+                // Next 6: 24h
+                // Next 6: 12h
+                let expiryHours = 12;
+                if (index < 6) expiryHours = 48;
+                else if (index < 12) expiryHours = 24;
+                else if (index < 18) expiryHours = 12;
+                else return false;
+                
+                const expiryMs = expiryHours * 60 * 60 * 1000;
+                const itemTime = typeof item.timestamp === 'number' ? item.timestamp : new Date(item.timestamp).getTime();
+                return (now - itemTime) < expiryMs;
+            });
+            
+            if (searchHistory.length !== originalLength) {
+                logger.log(`Auto-cleaned ${originalLength - searchHistory.length} expired history items.`);
+                localStorage.setItem('speax_search_history', JSON.stringify(searchHistory));
+            }
+        }
+
+        setInterval(cleanupExpiredHistory, 60000);
 
         manualBtn.onclick = () => {
             const q = manualInput.value.trim();
@@ -205,9 +244,9 @@
         const client = new SpeaxToolClient(window.location.origin, 'SearchTool');
         setupStatusIndicator(client, 'status-dot', 'status-text');
 
-        client.registerAction('web_search', 'Performs a web search.', () => ({
+        client.registerAction('web_search', 'Performs a web search.', {
             type: 'object', properties: { query: { type: 'string' } }, required: ['query']
-        }), async (p) => {
+        }, async (p) => {
             const res = await performSearch(p.query);
             return { results: res.map(r => ({ title: r.title, snippet: r.snippet, url: r.url })) };
         });

@@ -5,19 +5,54 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Speax Notes</title>
     <link rel="stylesheet" href="/tool-shared.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
     <style>
         #note-editor {
             position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            width: 90%; max-width: 700px; height: 80%;
+            width: 95%; max-width: 800px; height: 90%;
             background: var(--surface); z-index: 200; border-radius: 12px;
             box-shadow: 0 0 50px rgba(0,0,0,0.8); display: none;
-            flex-direction: column; padding: 20px; border: 1px solid var(--outline);
+            flex-direction: column; padding: 0; border: 1px solid var(--outline);
+            overflow: hidden;
+        }
+        #editor-header {
+            padding: 15px 20px; border-bottom: 1px solid var(--outline);
+            display: flex; justify-content: space-between; align-items: center;
+            background: rgba(0,0,0,0.2);
+        }
+        #editor-body {
+            flex-grow: 1; overflow-y: auto; position: relative; display: flex; flex-direction: column;
+        }
+        #view-content {
+            padding: 20px; line-height: 1.6; color: var(--on-surface);
+        }
+        #view-content pre {
+            background: #1e1e1e; padding: 10px; border-radius: 6px; overflow-x: auto;
+        }
+        #view-content code {
+            font-family: 'Fira Code', 'Courier New', Courier, monospace;
+        }
+        #ace-editor-container {
+            flex-grow: 1; width: 100%; height: 100%; display: none;
+        }
+        #editor-footer {
+            padding: 15px 20px; border-top: 1px solid var(--outline);
+            display: flex; justify-content: flex-end; gap: 10px;
+            background: rgba(0,0,0,0.1);
         }
         #editor-overlay {
             position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 199; display: none;
         }
         .card { flex: 1; }
+        .item .type-badge {
+            font-size: 0.7rem; padding: 2px 6px; border-radius: 4px;
+            background: var(--outline); color: var(--on-surface-medium);
+            margin-left: 8px; vertical-align: middle; text-transform: uppercase;
+        }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/markdown-it/dist/markdown-it.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.7/ace.js"></script>
 </head>
 <body class="tool-content">
     <div id="login-section" class="header hidden">
@@ -59,12 +94,21 @@
 
     <div id="editor-overlay"></div>
     <div id="note-editor">
-        <div style="display: flex; justify-content: space-between; margin-bottom: 1rem; align-items: center;">
-            <h2 id="editor-title">Edit Note</h2>
-            <button class="btn-icon" id="close-editor">✕</button>
+        <div id="editor-header">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <h2 id="editor-title" style="margin: 0;">View Note</h2>
+                <span id="editor-type-badge" class="badge" style="font-size: 0.7rem;">TEXT</span>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <button class="primary small" id="toggle-edit-btn">Edit</button>
+                <button class="btn-icon" id="close-editor">✕</button>
+            </div>
         </div>
-        <textarea id="editor-content" placeholder="Write your note here..." style="flex-grow: 1; margin-bottom: 1rem; font-family: inherit; font-size: 1rem;"></textarea>
-        <div style="display: flex; justify-content: flex-end; gap: 10px;">
+        <div id="editor-body">
+            <div id="view-content"></div>
+            <div id="ace-editor-container"></div>
+        </div>
+        <div id="editor-footer" style="display: none;">
             <button id="save-note-btn" class="primary">Save Changes</button>
         </div>
     </div>
@@ -85,9 +129,26 @@
         const editor = document.getElementById('note-editor');
         const overlay = document.getElementById('editor-overlay');
         const editorTitle = document.getElementById('editor-title');
-        const editorContent = document.getElementById('editor-content');
+        const viewContent = document.getElementById('view-content');
+        const aceContainer = document.getElementById('ace-editor-container');
         const saveNoteBtn = document.getElementById('save-note-btn');
         const closeEditor = document.getElementById('close-editor');
+        const toggleEditBtn = document.getElementById('toggle-edit-btn');
+        const editorFooter = document.getElementById('editor-footer');
+        const typeBadge = document.getElementById('editor-type-badge');
+
+        const md = window.markdownit({
+            highlight: function (str, lang) {
+                if (lang && hljs.getLanguage(lang)) {
+                    try { return hljs.highlight(str, { language: lang }).value; } catch (__) {}
+                }
+                return ''; // use external default escaping
+            }
+        });
+
+        let aceEditor = null;
+        let currentEditingId = null;
+        let currentMode = 'view'; // 'view' or 'edit'
 
         // Hide header if in iframe
         if (window.parent !== window) {
@@ -95,10 +156,9 @@
         }
 
         if (!checkAuth()) {
-            document.getElementById('login-section').classList.remove('hidden');
+            const loginSection = document.getElementById('login-section');
+            if (loginSection) loginSection.classList.remove('hidden');
         }
-
-        let currentEditingId = null;
 
         const DB = {
             getTasks: () => JSON.parse(localStorage.getItem('speax_tasks') || '[]'),
@@ -146,7 +206,7 @@
                 div.className = 'item';
                 div.onclick = () => openNote(n.id);
                 div.innerHTML = `
-                    <div style="font-weight: 600;">${n.title}</div>
+                    <div style="font-weight: 600;">${n.title} <span class="type-badge">${n.type || 'text'}</span></div>
                     <div style="font-size: 0.85rem; color: var(--on-surface-medium); margin-top: 4px;">
                         ${n.content.substring(0, 80)}${n.content.length > 80 ? '...' : ''}
                     </div>
@@ -161,28 +221,105 @@
                 };
                 noteList.appendChild(div);
             });
+
+            // Real-time update check
+            if (currentEditingId && currentMode === 'view') {
+                const note = notes.find(n => n.id === currentEditingId);
+                if (note) renderNoteContent(note);
+            }
         }
 
-        function openNote(id) {
+        function renderNoteContent(note) {
+            const type = note.type || 'text';
+            typeBadge.textContent = type.toUpperCase();
+            
+            if (type === 'markdown') {
+                viewContent.innerHTML = md.render(note.content);
+            } else if (type === 'json') {
+                try {
+                    const obj = JSON.parse(note.content);
+                    const pretty = JSON.stringify(obj, null, 2);
+                    viewContent.innerHTML = `<pre><code class="language-json">${hljs.highlight(pretty, { language: 'json' }).value}</code></pre>`;
+                } catch (e) {
+                    viewContent.innerHTML = `<pre><code>${note.content}</code></pre>`;
+                }
+            } else {
+                viewContent.innerHTML = `<pre style="white-space: pre-wrap; font-family: inherit;">${note.content}</pre>`;
+            }
+        }
+
+        function openNote(id, mode = 'view') {
             const note = DB.getNotes().find(n => n.id === id);
             if (!note) return;
             currentEditingId = id;
+            currentMode = mode;
+            
             editorTitle.textContent = note.title;
-            editorContent.value = note.content;
+            renderNoteContent(note);
+            
+            if (mode === 'view') {
+                viewContent.style.display = 'block';
+                aceContainer.style.display = 'none';
+                editorFooter.style.display = 'none';
+                toggleEditBtn.textContent = 'Edit';
+            } else {
+                enterEditMode(note);
+            }
+
             editor.style.display = 'flex';
             overlay.style.display = 'block';
         }
 
+        function enterEditMode(note) {
+            currentMode = 'edit';
+            viewContent.style.display = 'none';
+            aceContainer.style.display = 'block';
+            editorFooter.style.display = 'flex';
+            toggleEditBtn.textContent = 'View';
+            
+            if (!aceEditor) {
+                aceEditor = ace.edit(aceContainer);
+                aceEditor.setTheme("ace/theme/monokai");
+                aceEditor.setOptions({
+                    fontSize: "14px",
+                    showPrintMargin: false,
+                    useSoftTabs: true,
+                    tabSize: 2
+                });
+            }
+            
+            const type = note.type || 'text';
+            let aceMode = "ace/mode/text";
+            if (type === 'markdown') aceMode = "ace/mode/markdown";
+            if (type === 'json') aceMode = "ace/mode/json";
+            
+            aceEditor.session.setMode(aceMode);
+            aceEditor.setValue(note.content, -1);
+            setTimeout(() => aceEditor.resize(), 10);
+            aceEditor.focus();
+        }
+
+        toggleEditBtn.onclick = () => {
+            const note = DB.getNotes().find(n => n.id === currentEditingId);
+            if (!note) return;
+            
+            if (currentMode === 'view') {
+                openNote(currentEditingId, 'edit');
+            } else {
+                openNote(currentEditingId, 'view');
+            }
+        };
+
         saveNoteBtn.onclick = () => {
             const notes = DB.getNotes();
             const note = notes.find(n => n.id === currentEditingId);
-            if (note) {
-                note.content = editorContent.value;
+            if (note && aceEditor) {
+                note.content = aceEditor.getValue();
                 note.modified = new Date().toISOString();
                 DB.saveNotes(notes);
                 render();
+                openNote(currentEditingId, 'view');
             }
-            editor.style.display = overlay.style.display = 'none';
         };
 
         closeEditor.onclick = overlay.onclick = () => editor.style.display = overlay.style.display = 'none';
@@ -215,19 +352,19 @@
         const client = new SpeaxToolClient(window.location.origin, 'NotesManager');
         setupStatusIndicator(client, 'status-dot', 'status-text');
 
-        client.registerAction('list_tasks', 'Returns all saved tasks.', () => ({}), async () => {
+        client.registerAction('list_tasks', 'Returns all saved tasks.', {}, async () => {
             logger.log('AI requested task list');
             return { tasks: DB.getTasks() };
         });
 
-        client.registerAction('add_task', 'Adds a new task.', () => ({
+        client.registerAction('add_task', 'Adds a new task.', {
             type: 'object',
             properties: { 
                 content: { type: 'string' },
                 title: { type: 'string' }
             },
             required: ['content']
-        }), async (a) => {
+        }, async (a) => {
             const title = a.title || a.content;
             logger.log(`AI adding task: "${title}"`);
             const tasks = DB.getTasks();
@@ -238,9 +375,9 @@
             return { success: true, task: t };
         });
 
-        client.registerAction('complete_task', 'Completes a task by ID or partial match.', () => ({
+        client.registerAction('complete_task', 'Completes a task by ID or partial match.', {
             type: 'object', properties: { id: { type: 'string' } }, required: ['id']
-        }), async (a) => {
+        }, async (a) => {
             const tasks = DB.getTasks();
             const t = tasks.find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
             if (t) {
@@ -252,26 +389,113 @@
             return { success: false, error: 'Task not found' };
         });
 
-        client.registerAction('list_notes', 'Lists note titles and IDs.', () => ({}), async () => {
+        client.registerAction('update_task', 'Updates a task by ID or partial match.', {
+            type: 'object',
+            properties: { 
+                id: { type: 'string' },
+                content: { type: 'string' },
+                title: { type: 'string' },
+                done: { type: 'boolean' }
+            },
+            required: ['id']
+        }, async (a) => {
+            const tasks = DB.getTasks();
+            const t = tasks.find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
+            if (t) {
+                if (a.content !== undefined) t.content = a.content;
+                if (a.title !== undefined) t.title = a.title;
+                if (a.done !== undefined) t.done = a.done;
+                DB.saveTasks(tasks);
+                render();
+                return { success: true, task: t };
+            }
+            return { success: false, error: 'Task not found' };
+        });
+
+        client.registerAction('delete_task', 'Deletes a task by ID or partial match.', {
+            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
+        }, async (a) => {
+            const tasks = DB.getTasks();
+            const initialLen = tasks.length;
+            const newTasks = tasks.filter(x => x.id !== a.id && !(x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
+            if (newTasks.length < initialLen) {
+                DB.saveTasks(newTasks);
+                render();
+                return { success: true };
+            }
+            return { success: false, error: 'Task not found' };
+        });
+
+        client.registerAction('list_notes', 'Lists note titles and IDs.', {}, async () => {
             return { notes: DB.getNotes().map(n => ({ id: n.id, title: n.title })) };
         });
 
-        client.registerAction('add_note', 'Adds a new note.', () => ({
-            type: 'object', properties: { title: { type: 'string' }, content: { type: 'string' } }, required: ['title']
-        }), async (a) => {
+        client.registerAction('add_note', 'Adds a new note.', {
+            type: 'object', 
+            properties: { 
+                title: { type: 'string' }, 
+                content: { type: 'string' },
+                type: { type: 'string', enum: ['text', 'markdown', 'json'], default: 'text' }
+            }, 
+            required: ['title']
+        }, async (a) => {
             const notes = DB.getNotes();
-            const n = { id: Date.now().toString(), title: a.title, content: a.content || '', modified: new Date().toISOString() };
+            const n = { 
+                id: Date.now().toString(), 
+                title: a.title, 
+                content: a.content || '', 
+                type: a.type || 'text',
+                modified: new Date().toISOString() 
+            };
             notes.unshift(n);
             DB.saveNotes(notes);
             render();
             return { success: true, note: n };
         });
 
-        client.registerAction('read_note', 'Reads a note by ID or title.', () => ({
+        client.registerAction('read_note', 'Reads a note by ID or title.', {
             type: 'object', properties: { id: { type: 'string' } }, required: ['id']
-        }), async (a) => {
-            const n = DB.getNotes().find(x => x.id === a.id || x.title.toLowerCase().includes(a.id.toLowerCase()));
+        }, async (a) => {
+            const n = DB.getNotes().find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
             return n ? { success: true, note: n } : { success: false, error: 'Note not found' };
+        });
+
+        client.registerAction('update_note', 'Updates a note by ID or title.', {
+            type: 'object', 
+            properties: { 
+                id: { type: 'string' },
+                title: { type: 'string' },
+                content: { type: 'string' },
+                type: { type: 'string', enum: ['text', 'markdown', 'json'] }
+            }, 
+            required: ['id']
+        }, async (a) => {
+            const notes = DB.getNotes();
+            const n = notes.find(x => x.id === a.id || (x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
+            if (n) {
+                if (a.title !== undefined) n.title = a.title;
+                if (a.content !== undefined) n.content = a.content;
+                if (a.type !== undefined) n.type = a.type;
+                n.modified = new Date().toISOString();
+                DB.saveNotes(notes);
+                render();
+                return { success: true, note: n };
+            }
+            return { success: false, error: 'Note not found' };
+        });
+
+        client.registerAction('delete_note', 'Deletes a note by ID or title.', {
+            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
+        }, async (a) => {
+            const notes = DB.getNotes();
+            const initialLen = notes.length;
+            const newNotes = notes.filter(x => x.id !== a.id && !(x.title && x.title.toLowerCase().includes(a.id.toLowerCase())));
+            if (newNotes.length < initialLen) {
+                DB.saveNotes(newNotes);
+                render();
+                return { success: true };
+            }
+            return { success: false, error: 'Note not found' };
         });
 
         client.connect();

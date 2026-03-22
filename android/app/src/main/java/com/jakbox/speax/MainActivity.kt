@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
 
     private var speaxWebSocket: SpeaxWebSocket? = null
     lateinit var audioEngine: AudioEngine
+    private val notificationSounds = NotificationSounds()
     private val httpClient = OkHttpClient()
     private var mediaSession: MediaSession? = null
 
@@ -139,6 +140,9 @@ class MainActivity : ComponentActivity() {
 
     // Auth State
     var sessionCookie by mutableStateOf<String?>(null)
+    private var wasSuccessfullyConnected = false
+    private var suppressNextConnectTone = false
+    private var suppressNextDisconnectTone = false
 
     // Native STT
     private var speechRecognizer: SpeechRecognizer? = null
@@ -237,6 +241,11 @@ class MainActivity : ComponentActivity() {
 
         setupMediaSession()
         setupSpeechRecognizer()
+
+        // 3. Auto-connect if we have a session
+        if (sessionCookie != null) {
+            connectWebSocket()
+        }
 		
 		// Register the local receiver so we can use mute/playpause hardware
 	    val filter = IntentFilter("SPEAX_HARDWARE_BTN")
@@ -686,8 +695,10 @@ class MainActivity : ComponentActivity() {
 
     fun toggleConnection() {
         if (isConnected) {
+            suppressNextDisconnectTone = true
             disconnectWebSocket()
         } else {
+            suppressNextConnectTone = true
             connectWebSocket()
         }
     }
@@ -743,24 +754,50 @@ class MainActivity : ComponentActivity() {
         val fullUrl = "$serverUrl?client=android&device=$deviceName"
 
         statusText = "Connecting..."
-        speaxWebSocket = SpeaxWebSocket(
+        
+        // Ensure only one connection exists: explicitly disconnect any lingering socket
+        speaxWebSocket?.disconnect()
+        
+        val newSocket = SpeaxWebSocket(
             url = fullUrl,
             cookie = sessionCookie ?: "",
-            onTextReceived = { text ->
-                // OkHttp calls this on a background thread. Keep the JSON parsing here!
-                handleIncomingText(text)
+            onTextReceived = { socket, text ->
+                if (speaxWebSocket == socket) {
+                    handleIncomingText(text)
+                }
             },
-            onAudioReceived = { audioBytes ->
-                Log.d("SpeaxClient", "RX Audio: ${audioBytes.size} bytes")
-                audioEngine.playAudioChunk(audioBytes)
+            onAudioReceived = { socket, audioBytes ->
+                if (speaxWebSocket == socket) {
+                    Log.d("SpeaxClient", "RX Audio: ${audioBytes.size} bytes")
+                    audioEngine.playAudioChunk(audioBytes)
+                }
             },
-            onClosed = {
-                if (isConnected) {
-                    attemptReconnect()
+            onConnected = { socket ->
+                if (speaxWebSocket == socket) {
+                    wasSuccessfullyConnected = true
+                    if (!suppressNextConnectTone) {
+                        notificationSounds.playConnect()
+                    }
+                    suppressNextConnectTone = false
+                }
+            },
+            onClosed = { socket ->
+                if (speaxWebSocket == socket) {
+                    if (wasSuccessfullyConnected) {
+                        if (!suppressNextDisconnectTone) {
+                            notificationSounds.playDisconnect()
+                        }
+                        wasSuccessfullyConnected = false
+                        suppressNextDisconnectTone = false
+                    }
+                    if (isConnected) {
+                        attemptReconnect()
+                    }
                 }
             }
         )
-        speaxWebSocket?.connect()
+        speaxWebSocket = newSocket
+        newSocket.connect()
         
         // Ask the Go server for the latest settings, threads, and history
         // The server is the single source of truth for cross-device sessions
@@ -1105,6 +1142,7 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
 	    unregisterReceiver(hardwareButtonReceiver)
         audioEngine.stopRecording()
+        audioEngine.release()
         disconnectWebSocket()
         speechRecognizer?.destroy()
         mediaSession?.release()

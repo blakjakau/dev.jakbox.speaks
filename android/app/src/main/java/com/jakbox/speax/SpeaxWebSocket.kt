@@ -16,14 +16,19 @@ import kotlin.math.min
 class SpeaxWebSocket(
     private val url: String,
     private val cookie: String, // e.g. speax_session=12345
-    private val onTextReceived: (String) -> Unit,
-    private val onAudioReceived: (ByteArray) -> Unit,
-    private val onClosed: () -> Unit
+    private val onTextReceived: (SpeaxWebSocket, String) -> Unit,
+    private val onAudioReceived: (SpeaxWebSocket, ByteArray) -> Unit,
+    private val onConnected: (SpeaxWebSocket) -> Unit,
+    private val onClosed: (SpeaxWebSocket) -> Unit
 ) {
+    companion object {
+        private val client = OkHttpClient()
+    }
+
     private var webSocket: WebSocket? = null
-    private val client = OkHttpClient()
 
     fun connect() {
+        Log.d("SpeaxWS", "Connecting to $url")
         val request = Request.Builder()
             .url(url)
             .addHeader("Cookie", cookie)
@@ -32,26 +37,27 @@ class SpeaxWebSocket(
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d("SpeaxWS", "Connected!")
+                onConnected(this@SpeaxWebSocket)
                 webSocket.send("[REQUEST_SYNC]")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                onTextReceived(text)
+                onTextReceived(this@SpeaxWebSocket, text)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 // This is our Piper TTS streaming in!
-                onAudioReceived(bytes.toByteArray())
+                onAudioReceived(this@SpeaxWebSocket, bytes.toByteArray())
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d("SpeaxWS", "Closing: $reason")
-                onClosed()
+                onClosed(this@SpeaxWebSocket)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e("SpeaxWS", "Error: ${t.message}")
-                onClosed()
+                onClosed(this@SpeaxWebSocket)
             }
         })
     }

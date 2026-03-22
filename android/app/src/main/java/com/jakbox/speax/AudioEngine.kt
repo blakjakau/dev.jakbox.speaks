@@ -3,12 +3,7 @@ package com.jakbox.speax
 import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioManager
-import android.media.AudioRecord
 import android.media.AudioTrack
-import android.media.MediaRecorder
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import kotlin.math.sqrt
 import java.util.concurrent.LinkedBlockingQueue
@@ -27,248 +22,74 @@ class AudioEngine(
     private val sampleRate = 16000
     private val channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-    private val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
 
-    private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
-    private var recordingThread: Thread? = null
     private var playbackThread: Thread? = null
-    private var noiseSuppressor: NoiseSuppressor? = null
-    private var echoCanceler: AcousticEchoCanceler? = null
-    private var autoGainControl: AutomaticGainControl? = null
     private var progressThread: Thread? = null
     private val audioQueue = LinkedBlockingQueue<Pair<ByteArray, Int>>()
     @Volatile private var isPausedLocally = false
     var isMicMuted = false
+        set(value) {
+            field = value
+            nativeAudioEngine?.setMuted(value)
+        }
     var micProfile: String = "standard"
     var averageSpeechRms = 600.0 // Baseline adaptive RMS tracker
     private var totalAiFrames = 0
     private var totalWrittenFrames = 0
     private val rmsQueue = java.util.concurrent.ConcurrentLinkedQueue<Pair<Int, Float>>()
-    private var speechStartTime = 0L
-    
-    // Streaming state
-    @Volatile private var isStreamActive = false
-    @Volatile private var currentSeqID = 0L
-    private var lastStreamingSendTime = 0L
-    private val audioChunks = mutableListOf<ShortArray>()
-    private val streamingLock = Any()
+    private var currentSeqID = 0L
 
-    // VAD Constants
-    // 500.0 matches the 0.015 float threshold from the PWA (0.015 * 32768 ≈ 491.5)
-    var noiseThreshold = 255.0 // Reduced from 300.0 by ~15% for better sensitivity
-    private val SILENCE_FRAMES_LIMIT = 65 // 65 frames * 32ms = ~2s silence before finalizing
-    private val PRE_ROLL_FRAMES = 16 // 16 frames * 32ms = ~0.5s to catch soft leading consonants
-    private val MIN_CHUNKS = 16 // 16 frames * 1024 bytes = ~16,384 bytes minimum for Whisper
-    private val FRAME_SIZE = 512 // 512 shorts (1024 bytes) = 32ms audio chunks for silky smooth UI
-    private val GAIN_MULTIPLIER = 1.0f // Software boost to counteract VOICE_COMMUNICATION AGC
-    private val STREAMING_INTERVAL = 1500L
+    var noiseThreshold = 255.0
+
+    private var nativeAudioEngine: NativeAudioEngine? = null
+
+    init {
+        nativeAudioEngine = NativeAudioEngine(
+            onSpeechStart = {
+                Log.d("AudioEngine", "Speech detected! Suspending playback instantly.")
+                suspendPlayback()
+                onSpeechStart()
+            },
+            onStreamingChunk = { buffer, size, type ->
+                val byteArray = ByteArray(size)
+                buffer.get(byteArray)
+                onStreamingChunk(byteArray, currentSeqID, type)
+            },
+            onSpeechEnd = { buffer, size ->
+                val byteArray = ByteArray(size)
+                buffer.get(byteArray)
+                Log.d("AudioEngine", "Native VAD: End of speech, sending final ${byteArray.size} bytes")
+                onStreamingChunk(byteArray, currentSeqID, 0x02.toByte()) // 0x02: END
+            },
+            onVolumeChange = { rms ->
+                onVolumeChange(if (isMicMuted) 0f else rms)
+            }
+        )
+    }
 
     @SuppressLint("MissingPermission")
     fun startRecording() {
-        if (recordingThread != null) return
-
-        val audioSource = if (micProfile == "sensitive") MediaRecorder.AudioSource.VOICE_RECOGNITION else MediaRecorder.AudioSource.VOICE_COMMUNICATION
-
-        audioRecord = AudioRecord(
-            audioSource,
-            sampleRate,
-            channelConfig,
-            audioFormat,
-            bufferSize
-        )
-
-        // Explicitly attach hardware filtering to match PWA capabilities
-        val sessionId = audioRecord?.audioSessionId ?: 0
-        if (sessionId != 0 && micProfile == "heavy") {
-            if (NoiseSuppressor.isAvailable()) {
-                noiseSuppressor = NoiseSuppressor.create(sessionId)
-                noiseSuppressor?.enabled = true
-            }
-            if (AcousticEchoCanceler.isAvailable()) {
-                echoCanceler = AcousticEchoCanceler.create(sessionId)
-                echoCanceler?.enabled = true
-            }
-            if (AutomaticGainControl.isAvailable()) {
-                autoGainControl = AutomaticGainControl.create(sessionId)
-                autoGainControl?.enabled = true
-            }
+        nativeAudioEngine?.setProfile(micProfile)
+        nativeAudioEngine?.setThreshold(noiseThreshold)
+        currentSeqID = System.currentTimeMillis()
+        val result = nativeAudioEngine?.start()
+        if (result != 0) {
+            Log.e("AudioEngine", "Failed to start native audio engine: $result")
         }
-
-        audioRecord?.startRecording()
-
-        recordingThread = Thread {
-            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            val buffer = ShortArray(FRAME_SIZE)
-            var isSpeaking = false
-            var silenceFrames = 0
-            val preRollBuffer = mutableListOf<ShortArray>()
-
-            while (!Thread.currentThread().isInterrupted) {
-                // READ_BLOCKING ensures we always get exactly 4096 samples per loop, keeping time logic accurate
-                val readResult = audioRecord?.read(buffer, 0, FRAME_SIZE, AudioRecord.READ_BLOCKING) ?: 0
-                if (readResult > 0) {
-                    
-                    val isAiPlaying = audioTrack?.playState == AudioTrack.PLAYSTATE_PLAYING || audioQueue.isNotEmpty()
-                    var targetDuckMultiplier = 1.0f
-                    if (isAiPlaying) {
-                        if (micProfile == "mute_playback") {
-                            targetDuckMultiplier = 0.0f
-                        } else if (micProfile == "adaptive") {
-                            targetDuckMultiplier = Math.max(0.01f, Math.min(0.5f, (averageSpeechRms.toFloat() / 600.0f) * 0.1f))
-                        } else {
-                            targetDuckMultiplier = 0.1f
-                        }
-                    }
-
-                    // Apply Digital Gain Boost
-                    val dynamicGain = if (micProfile == "sensitive") 1.8f else GAIN_MULTIPLIER
-                    for (i in 0 until readResult) {
-                        var sample = (buffer[i] * dynamicGain * targetDuckMultiplier).toInt()
-                        // Hard clip to prevent integer overflow distortion
-                        if (sample > Short.MAX_VALUE) sample = Short.MAX_VALUE.toInt()
-                        if (sample < Short.MIN_VALUE) sample = Short.MIN_VALUE.toInt()
-                        buffer[i] = sample.toShort()
-                    }
-
-                    // Calculate RMS
-                    var sum = 0.0
-                    for (i in 0 until readResult) {
-                        sum += buffer[i] * buffer[i]
-                    }
-                    val rms = sqrt(sum / readResult)
-
-                    // Pipe volume back to UI for the visualizer
-                    onVolumeChange(if (isMicMuted) 0f else rms.toFloat())
-
-                    var currentThreshold = if (micProfile == "adaptive") Math.max(100.0, averageSpeechRms * 0.3) else noiseThreshold
-                    if (micProfile == "sensitive") currentThreshold = 150.0 // Increased sensitivity (lower threshold)
-
-                    if (isMicMuted) {
-                        if (isSpeaking) {
-                            isSpeaking = false
-                            silenceFrames = 0
-                            forceEndStreaming()
-                        }
-                        preRollBuffer.add(buffer.copyOf(readResult))
-                        if (preRollBuffer.size > PRE_ROLL_FRAMES) preRollBuffer.removeAt(0)
-                        continue
-                    }
-
-                    if (rms > currentThreshold) {
-                        if (!isSpeaking) {
-                            Log.d("AudioEngine", "Speech detected! Suspending playback instantly.")
-                            isSpeaking = true
-
-                            synchronized(streamingLock) {
-                                isStreamActive = true
-                                currentSeqID = System.currentTimeMillis()
-                                lastStreamingSendTime = currentSeqID
-                                audioChunks.clear()
-                                audioChunks.addAll(preRollBuffer)
-                            }
-
-                            speechStartTime = System.currentTimeMillis()
-                            suspendPlayback() // Match PWA: Instant pause on interruption
-                            onSpeechStart()
-                            preRollBuffer.clear() // Clear it so we don't accidentally duplicate on rapid VAD toggles
-                        }
-                        silenceFrames = 0
-                        synchronized(streamingLock) {
-                            audioChunks.add(buffer.copyOf(readResult))
-                        }
-                    } else if (isSpeaking) {
-                        synchronized(streamingLock) {
-                            audioChunks.add(buffer.copyOf(readResult)) // Keep trailing silence
-                        }
-                        silenceFrames++
-                        if (silenceFrames >= SILENCE_FRAMES_LIMIT) {
-                            isSpeaking = false
-                            silenceFrames = 0
-                            forceEndStreaming()
-                        }
-                    } else {
-                        // Not speaking, maintain rolling pre-roll
-                        preRollBuffer.add(buffer.copyOf(readResult))
-                        if (preRollBuffer.size > PRE_ROLL_FRAMES) {
-                            preRollBuffer.removeAt(0)
-                        }
-                    }
-
-                    // Streaming Periodic Send
-                    if (isStreamActive) {
-                        val now = System.currentTimeMillis()
-                        if (now - lastStreamingSendTime >= STREAMING_INTERVAL) {
-                            val pcmData: ByteArray
-                            var seqID: Long
-                            synchronized(streamingLock) {
-                                pcmData = flattenChunks(audioChunks)
-                                audioChunks.clear()
-                                seqID = currentSeqID
-                                lastStreamingSendTime = now
-                            }
-                            onStreamingChunk(pcmData, seqID, 0x01.toByte()) // 0x01: STREAM
-                        }
-                    }
-                }
-            }
-        }
-        recordingThread?.start()
     }
 
     fun stopRecording() {
-        forceEndStreaming()
-        recordingThread?.interrupt()
-        recordingThread = null
-        audioRecord?.stop()
-        audioRecord?.release()
-        audioRecord = null
-
-        noiseSuppressor?.release()
-        noiseSuppressor = null
-        
-        echoCanceler?.release()
-        echoCanceler = null
-        
-        autoGainControl?.release()
-        autoGainControl = null
+        nativeAudioEngine?.stop()
     }
 
     fun forceEndStreaming() {
-        if (!isStreamActive) return
-        val pcmData: ByteArray
-        var seqID: Long
-        synchronized(streamingLock) {
-            if (!isStreamActive) return
-            pcmData = flattenChunks(audioChunks)
-            audioChunks.clear()
-            seqID = currentSeqID
-            isStreamActive = false
-        }
-        Log.d("AudioEngine", "Forcing end of streaming session, sending final ${pcmData.size} bytes")
-        onStreamingChunk(pcmData, seqID, 0x02.toByte()) // 0x02: END
+        nativeAudioEngine?.forceEndStreaming()
     }
 
-    private fun flattenChunks(chunks: List<ShortArray>): ByteArray {
-        val totalSamples = chunks.sumOf { it.size }
-        val byteBuffer = java.nio.ByteBuffer.allocate(totalSamples * 2)
-        byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-        
-        var sumSquares = 0.0
-        for (chunk in chunks) {
-            for (sample in chunk) {
-                byteBuffer.putShort(sample)
-                sumSquares += sample.toDouble() * sample.toDouble()
-            }
-        }
-        
-        // Update adaptive baseline for VAD if this is the final finalization
-        if (totalSamples > 0) {
-            val chunkRms = sqrt(sumSquares / totalSamples)
-            averageSpeechRms = (0.8 * averageSpeechRms) + (0.2 * chunkRms)
-        }
-        
-        return byteBuffer.array()
+    fun release() {
+        nativeAudioEngine?.release()
+        nativeAudioEngine = null
     }
 
     fun playAudioChunk(pcmData: ByteArray, pcmSampleRate: Int = 22050) {

@@ -117,9 +117,9 @@
         client = new SpeaxToolClient(window.location.origin, 'TimerTool');
         setupStatusIndicator(client, 'status-dot', 'status-text');
 
-        client.registerAction('set_timer', 'Sets a countdown timer.', () => ({
+        client.registerAction('set_timer', 'Sets a countdown timer.', {
             type: 'object', properties: { seconds: { type: 'number' }, label: { type: 'string' } }, required: ['seconds']
-        }), async (a) => {
+        }, async (a) => {
             const id = Math.random().toString(36).substr(2, 9);
             const timer = { id, label: a.label || 'Timer', end: Date.now() + (a.seconds * 1000), notified: false };
             timers.push(timer);
@@ -128,10 +128,10 @@
             return { success: true, id };
         });
 
-        client.registerAction('list_timers', 'Lists all timers.', () => ({}), async () => ({ timers }));
-        client.registerAction('cancel_timer', 'Cancels a timer.', () => ({
+        client.registerAction('list_timers', 'Lists all timers.', {}, async () => ({ timers }));
+        client.registerAction('cancel_timer', 'Cancels a timer.', {
             type: 'object', properties: { id: { type: 'string' } }, required: ['id']
-        }), async (a) => {
+        }, async (a) => {
             const exists = timers.some(t => t.id === a.id);
             timers = timers.filter(t => t.id !== a.id);
             save();

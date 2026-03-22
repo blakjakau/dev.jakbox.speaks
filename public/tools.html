@@ -109,6 +109,23 @@
             gap: 1.5rem;
             align-items: center;
         }
+
+        .logout-link {
+            color: var(--on-surface-medium);
+            text-decoration: none;
+            font-size: 0.9rem;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            border: 1px solid transparent;
+        }
+
+        .logout-link:hover {
+            color: var(--error);
+            background: rgba(255, 82, 82, 0.1);
+            border-color: rgba(255, 82, 82, 0.2);
+        }
     </style>
 </head>
 <body>
@@ -124,6 +141,7 @@
                 <div class="dot online"></div>
                 <span>Speax Tools Online</span>
             </div>
+            <a href="/auth/logout" class="logout-link">Logout</a>
         </div>
     </nav>
 

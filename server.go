@@ -76,12 +76,48 @@ var (
 	ollamaChatIndex uint32
 )
 
+type WhisperNode struct {
+	URL              string
+	Zombie           bool
+	LastResponseTime time.Duration
+	FailureCount     int
+	TotalRequests    int
+	TotalFailures    int
+}
+
+var (
+	whisperNodes      []*WhisperNode
+	whisperNodesMutex sync.RWMutex
+)
+
+var ErrNoHealthyNodes = fmt.Errorf("all Whisper nodes are unhealthy")
+
 func getNextURL(urls []string, index *uint32) string {
 	if len(urls) == 0 {
 		return ""
 	}
 	newIdx := atomic.AddUint32(index, 1)
 	return urls[int(newIdx-1)%len(urls)]
+}
+
+func getHealthyWhisperNode() (*WhisperNode, error) {
+	whisperNodesMutex.RLock()
+	defer whisperNodesMutex.RUnlock()
+
+	numNodes := len(whisperNodes)
+	if numNodes == 0 {
+		return nil, ErrNoHealthyNodes
+	}
+
+	for i := 0; i < numNodes; i++ {
+		idx := atomic.AddUint32(&whisperIndex, 1) - 1
+		node := whisperNodes[idx%uint32(numNodes)]
+		if !node.Zombie {
+			return node, nil
+		}
+	}
+
+	return nil, ErrNoHealthyNodes
 }
 
 func reloadConfig(path string) error {
@@ -100,6 +136,23 @@ func reloadConfig(path string) error {
 	configMutex.Lock()
 	config = newConfig
 	configMutex.Unlock()
+
+	// Initialize Whisper nodes
+	whisperNodesMutex.Lock()
+	existingNodes := make(map[string]*WhisperNode)
+	for _, node := range whisperNodes {
+		existingNodes[node.URL] = node
+	}
+	var newNodes []*WhisperNode
+	for _, url := range newConfig.WhisperURLs {
+		if node, exists := existingNodes[url]; exists {
+			newNodes = append(newNodes, node)
+		} else {
+			newNodes = append(newNodes, &WhisperNode{URL: url, Zombie: false})
+		}
+	}
+	whisperNodes = newNodes
+	whisperNodesMutex.Unlock()
 	return nil
 }
 
@@ -743,6 +796,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			}
 			session.Mutex.Unlock()
 		} else {
+			fmt.Printf("Client disconnected: %s (%s on %s)\n", clientID, clientType, deviceName)
 			session.Mutex.Lock()
 			t := session.ActiveThread()
 			lastIdx := len(t.History) - 1
@@ -1193,8 +1247,24 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 			// Process the complete phrase sent by the client
 			go func(audio []byte, bt time.Time) {
-				text, err := queryWhisper(audio)
+				text, err := queryWhisper(audio, session)
 				if err != nil {
+					if err == ErrNoHealthyNodes {
+						session.Mutex.Lock()
+						t := session.ActiveThread()
+						failMsg := "[System: All STT nodes are currently offline or unhealthy. The user's most recent audio could not be transcribed. Please inform the user of this service interruption and offer to help via text instead.]"
+						t.History = append(t.History, ChatMessage{Role: "system", Content: failMsg})
+						session.Mutex.Unlock()
+
+						ctx, cancel := context.WithCancel(context.Background())
+						session.Mutex.Lock()
+						session.ActiveCancel = cancel
+						session.Mutex.Unlock()
+
+						if err := streamLLMAndTTS(ctx, "[SYSTEM_STT_FAILURE]", ws, session); err != nil {
+							log.Println("LLM stt failure stream error:", err)
+						}
+					}
 					log.Println("Whisper error:", err)
 					return
 				}
@@ -1281,8 +1351,24 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 }
 
 func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio []byte) {
-	text, err := queryWhisper(audio)
+	text, err := queryWhisper(audio, session)
 	if err != nil {
+		if err == ErrNoHealthyNodes {
+			session.Mutex.Lock()
+			t := session.ActiveThread()
+			failMsg := "[System: All STT nodes are currently offline or unhealthy. The user's most recent audio could not be transcribed. Please inform the user of this service interruption and offer to help via text instead.]"
+			t.History = append(t.History, ChatMessage{Role: "system", Content: failMsg})
+			session.Mutex.Unlock()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			session.Mutex.Lock()
+			session.ActiveCancel = cancel
+			session.Mutex.Unlock()
+
+			if err := streamLLMAndTTS(ctx, "[SYSTEM_STT_FAILURE]", ws, session); err != nil {
+				log.Println("LLM stt failure stream error:", err)
+			}
+		}
 		log.Println("Whisper error:", err)
 		return
 	}
@@ -1361,40 +1447,83 @@ func addWavHeader(pcmData []byte) []byte {
 	return buf.Bytes()
 }
 
-func queryWhisper(audioData []byte) (string, error) {
+func queryWhisper(audioData []byte, session *ClientSession) (string, error) {
 	if len(audioData) == 0 {
 		return "", fmt.Errorf("empty audio data")
 	}
 
+	durationSecs := float64(len(audioData)) / float64(config.SampleRate*2)
+	timeoutSecs := (durationSecs * 0.25) + 2.5
+	timeoutDuration := time.Duration(timeoutSecs * float64(time.Second))
+
 	wavData := addWavHeader(audioData)
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
 
-	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", `form-data; name="file"; filename="input.wav"`)
-	h.Set("Content-Type", "audio/wav")
-	part, _ := writer.CreatePart(h)
-	part.Write(wavData)
-	writer.Close()
+	for attempt := 0; attempt < 3; attempt++ {
+		node, err := getHealthyWhisperNode()
+		if err != nil {
+			return "", err
+		}
 
-	configMutex.RLock()
-	whisperURLs := config.WhisperURLs
-	configMutex.RUnlock()
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Disposition", `form-data; name="file"; filename="input.wav"`)
+		h.Set("Content-Type", "audio/wav")
+		part, _ := writer.CreatePart(h)
+		part.Write(wavData)
+		writer.Close()
 
-	url := getNextURL(whisperURLs, &whisperIndex)
-	resp, err := http.Post(url, writer.FormDataContentType(), body)
-	if err != nil {
-		return "", err
+		log.Printf("[STT] Sending audio to node: %s (Attempt %d)", node.URL, attempt+1)
+		start := time.Now()
+		resp, err := http.Post(node.URL, writer.FormDataContentType(), body)
+		duration := time.Since(start)
+
+		node.TotalRequests++
+		if err != nil || resp.StatusCode != http.StatusOK || duration > timeoutDuration {
+			node.FailureCount++
+			node.TotalFailures++
+			
+			statusStr := "N/A"
+			if resp != nil {
+				statusStr = resp.Status
+			}
+			
+			if node.FailureCount >= 5 {
+				node.Zombie = true
+				log.Printf("[STT] Node flagged: %s (Duration: %v, Status: %s, Err: %v).", node.URL, duration, statusStr, err)
+				
+				// Notify the user via a system message in the thread
+				session.Mutex.Lock()
+				flagMsg := fmt.Sprintf("[System Note: Whisper node %s flagged as unhealthy/slow (%v). Routing to fallback.]", node.URL, duration.Truncate(time.Millisecond))
+				session.ActiveThread().History = append(session.ActiveThread().History, ChatMessage{Role: "system", Content: flagMsg})
+				session.Mutex.Unlock()
+				saveSession(session)
+				sendHistory(nil, session) // Sync history to all clients
+			} else {
+				log.Printf("[STT] Node attempt failed: %s (Duration: %v, Status: %s, Err: %v). Failures: %d/5", node.URL, duration, statusStr, err, node.FailureCount)
+			}
+
+			if resp != nil {
+				resp.Body.Close()
+			}
+			continue // Retry with another node
+		}
+		node.Zombie = false
+		node.LastResponseTime = duration
+		node.FailureCount = 0
+		log.Printf("[STT] Node response: %s (Duration: %v)", node.URL, duration.Truncate(time.Millisecond))
+
+		defer resp.Body.Close()
+		var result struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return "", err
+		}
+		return result.Text, nil
 	}
-	defer resp.Body.Close()
 
-	var result struct {
-		Text string `json:"text"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	return result.Text, nil
+	return "", fmt.Errorf("transcription failed after multiple attempts")
 }
 
 // buildToolSystemPrompt generates the JSON schema block for connected tools to inject into the LLM prompt.
@@ -1439,6 +1568,27 @@ func extractVoiceName(filename string) string {
 		return parts[1]
 	}
 	return base
+}
+
+func getSystemStatusPrompt() string {
+	whisperNodesMutex.RLock()
+	defer whisperNodesMutex.RUnlock()
+
+	if len(whisperNodes) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n\n### system status\nWhisper STT Nodes:\n")
+	for _, node := range whisperNodes {
+		status := "Healthy"
+		if node.Zombie {
+			status = "Zombie / Slow"
+		}
+		sb.WriteString(fmt.Sprintf("- %s: %s (avg response: %v, failures: %d/%d)\n",
+			node.URL, status, node.LastResponseTime.Truncate(time.Millisecond), node.FailureCount, node.TotalFailures))
+	}
+	return sb.String()
 }
 
 func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
@@ -1495,6 +1645,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
 	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
+	sysContent += getSystemStatusPrompt()
 
 	toolPrompt := buildToolSystemPrompt(session)
 	if toolPrompt != "" {
@@ -1998,6 +2149,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
 	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
+	sysContent += getSystemStatusPrompt()
 
 	// Long-term Memory
 	sysContent += alyxMemoryInstruction
@@ -2603,6 +2755,13 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
+func handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: "speax_session", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "speax_avatar", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "speax_google_name", Value: "", Path: "/", MaxAge: -1})
+	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+}
+
 func handleCallback(w http.ResponseWriter, r *http.Request) {
 	stateParam := r.FormValue("state")
 	parts := strings.SplitN(stateParam, "|", 2)
@@ -2777,6 +2936,7 @@ func handleVoices(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/auth/login", handleLogin)
+	http.HandleFunc("/auth/logout", handleLogout)
 	http.HandleFunc("/auth/callback", handleCallback)
 	http.HandleFunc("/api/models", handleModels)
 	http.HandleFunc("/api/voices", handleVoices)
