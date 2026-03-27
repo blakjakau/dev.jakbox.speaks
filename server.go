@@ -58,6 +58,8 @@ type Config struct {
 	ModelLimits          map[string]ModelRateLimit `json:"ModelLimits"`
 	DefaultLimit         ModelRateLimit            `json:"DefaultLimit"`
 	FallbackLLM          FallbackLLMConfig         `json:"FallbackLLM"`
+	GeminiModels         []string                  `json:"GeminiModels"`
+	OllamaModels         []string                  `json:"OllamaModels"`
 }
 
 type ModelRateLimit struct {
@@ -104,6 +106,12 @@ var (
 )
 
 func ollamaModelSupportsTools(model string) bool {
+	low := strings.ToLower(model)
+	// Explicitly block models that are known to struggle with native tool calling in this implementation
+	if strings.Contains(low, "gemma") || strings.Contains(low, "llama") {
+		return false
+	}
+
 	ollamaToolsSupportCacheMu.Lock()
 	if v, ok := ollamaToolsSupportCache[model]; ok {
 		ollamaToolsSupportCacheMu.Unlock()
@@ -564,7 +572,7 @@ type Thread struct {
 	History     []ChatMessage `json:"history"`
 	Archive     []ChatMessage `json:"archive"`
 	Summary     string        `json:"summary"`
-	ToolHistory []ChatMessage `json:"toolHistory"`
+	ToolHistory []ChatMessage `json:"-"` // Stored separately in system_[name].json
 }
 
 type ToolAction struct {
@@ -622,7 +630,9 @@ type ClientSession struct {
 	PassiveAssistant   bool                   `json:"passiveAssistant"`
 	LastActiveTime     time.Time              `json:"-"`
 	LastActiveConn     *websocket.Conn        `json:"-"` // Tracks the last client to send input (text/audio)
-	ModelUsage         map[string]*ModelUsage `json:"modelUsage"` // Per-model usage stats (pruned)
+	ModelUsage               map[string]*ModelUsage `json:"modelUsage"` // Per-model usage stats (pruned)
+	FallbackOriginalProvider string                 `json:"fallbackOriginalProvider"`
+	FallbackOriginalModel    string                 `json:"fallbackOriginalModel"`
 }
 
 func IsAdminID(id string) bool {
@@ -638,6 +648,18 @@ func IsAdminID(id string) bool {
 
 func (s *ClientSession) IsAdmin() bool {
 	return IsAdminID(s.ClientID)
+}
+
+func (s *ClientSession) isToolConn(ws *websocket.Conn) bool {
+	if ws == nil {
+		return false
+	}
+	s.ConnMutex.Lock()
+	defer s.ConnMutex.Unlock()
+	if meta, exists := s.Conns[ws]; exists {
+		return meta.ClientType == "tool"
+	}
+	return false
 }
 
 // appendMessage categorizes and adds a message to the appropriate log with a timestamp.
@@ -696,7 +718,8 @@ func (s *ClientSession) appendNativeToolResult(nativeName string, result string,
 }
 
 // getLLMContext prepares a chronologically interleaved history for the LLM.
-func (s *ClientSession) getLLMContext(thread *Thread) []ChatMessage {
+// supportsTools controls whether ToolHistory is merged in.
+func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []ChatMessage {
 	var ctxMsgs []ChatMessage
 
 	// Collect last 20 from SystemLog
@@ -706,15 +729,22 @@ func (s *ClientSession) getLLMContext(thread *Thread) []ChatMessage {
 	}
 	ctxMsgs = append(ctxMsgs, s.SystemLog[startIdx:]...)
 
-	// Collect last 10 from ToolHistory
-	startIdx = len(thread.ToolHistory) - 10
-	if startIdx < 0 {
-		startIdx = 0
+	// Collect last 10 from ToolHistory — only if the model supports tool calling
+	if supportsTools {
+		startIdx = len(thread.ToolHistory) - 10
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		ctxMsgs = append(ctxMsgs, thread.ToolHistory[startIdx:]...)
 	}
-	ctxMsgs = append(ctxMsgs, thread.ToolHistory[startIdx:]...)
 
-	// Collect all from History
-	ctxMsgs = append(ctxMsgs, thread.History...)
+	// Collect all from History - filter out tool-related calls/results if not supported
+	for _, m := range thread.History {
+		if !supportsTools && (m.ToolCall != nil || m.ToolResult != nil) {
+			continue
+		}
+		ctxMsgs = append(ctxMsgs, m)
+	}
 
 	// Sort chronologically
 	sort.Slice(ctxMsgs, func(i, j int) bool {
@@ -877,7 +907,7 @@ func safeWrite(ws *websocket.Conn, session *ClientSession, msgType int, data []b
 func sendOrBroadcastText(ws *websocket.Conn, session *ClientSession, data []byte) {
 	session.ConnMutex.Lock()
 	defer session.ConnMutex.Unlock()
-	if ws != nil {
+	if ws != nil && session.Conns[ws].ClientType != "tool" {
 		ws.WriteMessage(websocket.TextMessage, data)
 	} else {
 		for conn, meta := range session.Conns {
@@ -931,7 +961,14 @@ func getLastActiveUIConn(session *ClientSession) *websocket.Conn {
 			}
 		}
 	}
-	// Fallback to specific target if still alive, otherwise do nothing (drop audio) per user rule
+	// Fallback to any alive UI connection
+	for conn, meta := range session.Conns {
+		if meta.ClientType != "tool" {
+			log.Printf("[Routing] Using alternate connection for %s: %s", session.ClientID, meta.Device)
+			return conn
+		}
+	}
+	log.Printf("[Routing] No UI connection found for %s", session.ClientID)
 	return nil
 }
 
@@ -1001,13 +1038,25 @@ func loadSession(clientID string) *ClientSession {
 	if err == nil {
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") ||
-				entry.Name() == "config.json" || entry.Name() == "memory.json" || entry.Name() == "forgotten.json" || entry.Name() == "event-log.json" {
+				!strings.HasPrefix(entry.Name(), "chat-") {
 				continue
 			}
 			threadData, err := os.ReadFile(filepath.Join(ctxDir, entry.Name()))
 			if err == nil {
 				var t Thread
 				if err := json.Unmarshal(threadData, &t); err == nil && t.ID != "" {
+					// Try to load per-thread tool history from matching system-... file
+					sysFileName := "system-" + strings.TrimPrefix(entry.Name(), "chat-")
+					sysData, err := os.ReadFile(filepath.Join(ctxDir, sysFileName))
+					if err == nil {
+						var toolHistory []ChatMessage
+						if json.Unmarshal(sysData, &toolHistory) == nil {
+							t.ToolHistory = toolHistory
+						}
+					}
+					if t.ToolHistory == nil {
+						t.ToolHistory = []ChatMessage{}
+					}
 					session.Threads[t.ID] = &t
 				}
 			}
@@ -1186,11 +1235,27 @@ func saveSession(session *ClientSession) {
 			shortID = shortID[:6]
 		}
 
-		fileName := fmt.Sprintf("chat-%s-%s.json", sanitized, shortID)
-		activeFiles[fileName] = true
+		chatFileName := fmt.Sprintf("chat-%s-%s.json", sanitized, shortID)
+		sysFileName := fmt.Sprintf("system-%s-%s.json", sanitized, shortID)
+		activeFiles[chatFileName] = true
+		activeFiles["event-log.json"] = true
 
+		// Save tool history separately; omit field when serializing chat
+		originalToolHistory := t.ToolHistory
+		t.ToolHistory = nil
 		if data, err := json.MarshalIndent(t, "", "  "); err == nil {
-			os.WriteFile(filepath.Join(ctxDir, fileName), data, 0644)
+			os.WriteFile(filepath.Join(ctxDir, chatFileName), data, 0644)
+		}
+		t.ToolHistory = originalToolHistory
+
+		// Write or delete system_... file
+		if len(originalToolHistory) > 0 {
+			activeFiles[sysFileName] = true
+			if sysData, err := json.MarshalIndent(originalToolHistory, "", "  "); err == nil {
+				os.WriteFile(filepath.Join(ctxDir, sysFileName), sysData, 0644)
+			}
+		} else {
+			os.Remove(filepath.Join(ctxDir, sysFileName))
 		}
 	}
 
@@ -1263,6 +1328,103 @@ func trackTokens(session *ClientSession, key string, tokens int64) {
 	usage.TokenSamples = validSamples
 }
 
+func (s *ClientSession) isFallbackModel(model string) bool {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	for _, m := range config.FallbackLLM.Models {
+		if m == model || strings.HasPrefix(model, m+":") {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *ClientSession) checkRateLimitUnsafe(model string) (string, error) {
+	configMutex.RLock()
+	limits, ok := config.ModelLimits[model]
+	if !ok {
+		limits = config.DefaultLimit
+	}
+	configMutex.RUnlock()
+
+	// If no limits defined at all, allow
+	if limits.RPM <= 0 && limits.TPM <= 0 && limits.RPD <= 0 {
+		return "", nil
+	}
+
+	// Fallback models are exempt from checking other models' limits
+	// But in this context, we check if the SPECIFIED model is a fallback.
+	if s.isFallbackModel(model) {
+		return "", nil
+	}
+
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
+
+	usage, ok := s.ModelUsage[model]
+	if !ok {
+		return "", nil
+	}
+
+	now := time.Now()
+	oneMinuteAgo := now.Add(-time.Minute)
+	oneDayAgo := now.Add(-24 * time.Hour)
+
+	var warning string
+
+	// Check RPD
+	if limits.RPD > 0 {
+		count := 0
+		for _, t := range usage.RequestTimes {
+			if t.After(oneDayAgo) {
+				count++
+			}
+		}
+		if count >= limits.RPD {
+			return "", fmt.Errorf("Daily request limit reached for model %s (%d/%d)", model, count, limits.RPD)
+		}
+		if float64(count)/float64(limits.RPD) >= 0.9 {
+			warning = fmt.Sprintf("You are approaching the daily request limit for %s (%d/%d)", model, count, limits.RPD)
+		}
+	}
+
+	// Check RPM
+	rpmCount := 0
+	for i := len(usage.RequestTimes) - 1; i >= 0; i-- {
+		if usage.RequestTimes[i].After(oneMinuteAgo) {
+			rpmCount++
+		} else {
+			break
+		}
+	}
+	if limits.RPM > 0 {
+		if rpmCount >= limits.RPM {
+			return "", fmt.Errorf("Per-minute request limit reached for model %s (%d/%d)", model, rpmCount, limits.RPM)
+		}
+		if float64(rpmCount)/float64(limits.RPM) >= 0.9 && warning == "" {
+			warning = fmt.Sprintf("You are approaching the per-minute request limit for %s (%d/%d)", model, rpmCount, limits.RPM)
+		}
+	}
+
+	// Check TPM
+	var tpmCount int64
+	for _, ts := range usage.TokenSamples {
+		if ts.Timestamp.After(oneMinuteAgo) {
+			tpmCount += ts.Count
+		}
+	}
+	if limits.TPM > 0 {
+		if tpmCount >= int64(limits.TPM) {
+			return "", fmt.Errorf("Per-minute token limit reached for model %s (%d/%d tokens used)", model, tpmCount, limits.TPM)
+		}
+		if float64(tpmCount)/float64(limits.TPM) >= 0.9 && warning == "" {
+			warning = fmt.Sprintf("You are approaching the per-minute token limit for %s (%d/%d used)", model, tpmCount, limits.TPM)
+		}
+	}
+
+	return warning, nil
+}
+
 func (s *ClientSession) checkRateLimit(model string) (string, error) {
 	configMutex.RLock()
 	limits, ok := config.ModelLimits[model]
@@ -1273,6 +1435,11 @@ func (s *ClientSession) checkRateLimit(model string) (string, error) {
 
 	// If no limits defined at all, allow
 	if limits.RPM <= 0 && limits.TPM <= 0 && limits.RPD <= 0 {
+		return "", nil
+	}
+
+	// Fallback models are exempt
+	if s.isFallbackModel(model) {
 		return "", nil
 	}
 
@@ -1537,6 +1704,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 
 	session := getOrCreateSession(clientID)
 
+	if clientType != "tool" {
+		cacheModelsAsync(session.APIKey)
+	}
+
 	session.ConnMutex.Lock()
 	session.Conns[ws] = ConnMeta{ClientType: clientType, Device: deviceName}
 	session.ConnMutex.Unlock()
@@ -1649,6 +1820,42 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			if strings.HasPrefix(text, "[TOOL_EVENT]") {
+				payloadPart := strings.TrimPrefix(text, "[TOOL_EVENT]")
+				var event struct {
+					ToolName string `json:"toolName"`
+					Message  string `json:"message"`
+				}
+				if err := json.Unmarshal([]byte(payloadPart), &event); err == nil {
+					log.Printf("Received tool event from %s: %s", event.ToolName, event.Message)
+
+					session.Mutex.Lock()
+					t := session.ActiveThread()
+					session.appendMessage("system", fmt.Sprintf("[Tool Event (%s)]: %s", event.ToolName, event.Message), t)
+					session.Mutex.Unlock()
+					saveSession(session)
+
+					// Auto-trigger the AI to handle the event (DEBOUNCED)
+					session.Mutex.Lock()
+					if session.ToolDebounceTimer != nil {
+						session.ToolDebounceTimer.Stop()
+					}
+					session.ToolDebounceTimer = time.AfterFunc(2*time.Second, func() {
+						log.Printf("[LLM] Tool event trigger: AI auto-resume for %s.", session.ClientID)
+						ctx, cancel := context.WithCancel(context.Background())
+						session.Mutex.Lock()
+						session.ActiveCancel = cancel
+						session.Mutex.Unlock()
+
+						if err := streamLLMAndTTS(ctx, "[SYSTEM: Tool event received. Respond to user if necessary.]", ws, session); err != nil {
+							log.Println("LLM auto-resume error:", err)
+						}
+					})
+					session.Mutex.Unlock()
+				}
+				continue
+			}
+
 			if strings.HasPrefix(text, "[TOOL_RESULT]") {
 				payloadPart := strings.TrimPrefix(text, "[TOOL_RESULT]")
 				var result struct {
@@ -1724,6 +1931,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				t.History = []ChatMessage{}
 				t.Archive = []ChatMessage{}
 				t.Summary = ""
+				t.ToolHistory = []ChatMessage{}
 				session.Mutex.Unlock()
 				saveSession(session)
 				sendHistory(ws, session)
@@ -1856,6 +2064,10 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						session.ClientStorage = settings.ClientStorage
 						session.ClientTts = settings.ClientTts
 						session.PassiveAssistant = settings.PassiveAssistant
+
+						// Clear fallback state if model/provider changed manually
+						session.FallbackOriginalModel = ""
+						session.FallbackOriginalProvider = ""
 
 						// Update theme if voice changed
 						vName := strings.ToLower(extractVoiceName(session.Voice))
@@ -2550,8 +2762,28 @@ func getOllamaModelsInternal(isAdmin bool) []ModelData {
 		}
 		json.NewDecoder(resp.Body).Decode(&res)
 		for _, m := range res.Models {
-			if !isAdmin && m.Name == "gemma3:270m" {
-				continue // Internal model — not exposed to regular users
+			if !isAdmin {
+				if m.Name == "gemma3:270m" {
+					continue // Internal model — not exposed to regular users
+				}
+
+				configMutex.RLock()
+				inclusionList := config.OllamaModels
+				configMutex.RUnlock()
+
+				if len(inclusionList) > 0 {
+					found := false
+					for _, allowed := range inclusionList {
+						// Exact match only as requested
+						if m.Name == allowed {
+							found = true
+							break
+						}
+					}
+					if !found {
+						continue
+					}
+				}
 			}
 			out = append(out, ModelData{ID: m.Name, Name: m.Name})
 		}
@@ -2569,7 +2801,17 @@ func selectFallbackModel() (string, string) {
 		return "", ""
 	}
 
-	tagsURL := strings.TrimSuffix(fbURL, "/") + "/api/tags"
+	// Strip any existing API path (e.g. /api/chat) so we always hit the root /api/tags endpoint
+	parsedURL, parseErr := url.Parse(fbURL)
+	var tagsURL string
+	if parseErr == nil {
+		tagsURL = parsedURL.Scheme + "://" + parsedURL.Host + "/api/tags"
+	} else {
+		// Fallback: best-effort strip known API suffixes
+		base := strings.TrimSuffix(strings.TrimSuffix(fbURL, "/"), "/api/chat")
+		base = strings.TrimSuffix(base, "/api/generate")
+		tagsURL = strings.TrimSuffix(base, "/") + "/api/tags"
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(tagsURL)
 	if err != nil {
@@ -2638,12 +2880,31 @@ func getGeminiModelsInternal(apiKey string, isAdmin bool) []ModelData {
 						break
 					}
 
-					// Standard user filtering
-					isFlash := strings.Contains(displayName, "Flash")
-					isGemma := strings.Contains(displayName, "Gemma")
-					isGemini2 := strings.Contains(displayName, "Gemini 2")
-					if (isFlash || isGemma) && !isGemini2 {
-						out = append(out, ModelData{ID: strings.TrimPrefix(m.Name, "models/"), Name: displayName})
+					// Standard user filtering based on inclusion list in config
+					configMutex.RLock()
+					inclusionList := config.GeminiModels
+					configMutex.RUnlock()
+
+					if len(inclusionList) > 0 {
+						found := false
+						id := strings.TrimPrefix(m.Name, "models/")
+						for _, allowed := range inclusionList {
+							if id == allowed {
+								found = true
+								break
+							}
+						}
+						if found {
+							out = append(out, ModelData{ID: id, Name: displayName})
+						}
+					} else {
+						// Legacy fallback filtering if no inclusion list defined
+						isFlash := strings.Contains(displayName, "Flash")
+						isGemma := strings.Contains(displayName, "Gemma")
+						isGemini2 := strings.Contains(displayName, "Gemini 2")
+						if (isFlash || isGemma) && !isGemini2 {
+							out = append(out, ModelData{ID: strings.TrimPrefix(m.Name, "models/"), Name: displayName})
+						}
 					}
 					break
 				}
@@ -2797,9 +3058,16 @@ func prepareSystemPrompt(session *ClientSession, model, voiceName, provider stri
 		}
 	}
 
-	// 5b. Tool use directive — inject when tools are registered
+	// 5b. Tool use directive — inject when tools are registered AND the model supports them
 	// NOTE: caller may hold session.Mutex, so we access session.Tools directly (consistent with rest of function)
-	if len(session.Tools) > 0 {
+	toolsSupported := true
+	if provider == "ollama" {
+		toolsSupported = ollamaModelSupportsTools(model)
+	} else if provider == "gemini" {
+		toolsSupported = strings.Contains(strings.ToLower(model), "gemini")
+	}
+
+	if len(session.Tools) > 0 && toolsSupported {
 		configMutex.RLock()
 		toolDirective := config.ToolSystemPrompt
 		configMutex.RUnlock()
@@ -2827,13 +3095,15 @@ func saveCalculatedSystemPrompt(session *ClientSession, content string) {
 
 func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 	var finalMsgs []ChatMessage
+	var systemNoteBuffer []string
 
 	for _, m := range msgs {
 		role := m.Role
 		content := m.Content
 
+		isSystemNote := role == "system" && m.ToolResult == nil
 		// Coerce system into user messages with prefixes if no result field
-		if role == "system" && m.ToolResult == nil {
+		if isSystemNote {
 			role = "user"
 			if !strings.HasPrefix(content, "[System Note:") && !strings.HasPrefix(content, "[TOOL_RESULT") {
 				content = "[System Note]: " + content
@@ -2846,6 +3116,17 @@ func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 			} else if role == "tool" || m.ToolResult != nil {
 				role = "function"
 			}
+
+			// Gemini specific: function response MUST follow function call immediately.
+			// System notes (coerced to user) must not interject if we are in a tool sequence.
+			if isSystemNote && len(finalMsgs) > 0 {
+				lastRole := finalMsgs[len(finalMsgs)-1].Role
+				// If last was model with call OR another function result, keep buffering
+				if lastRole == "function" || (lastRole == "model" && finalMsgs[len(finalMsgs)-1].ToolCall != nil) {
+					systemNoteBuffer = append(systemNoteBuffer, content)
+					continue
+				}
+			}
 		}
 
 		// Tool calls/results should NOT be merged with previous text blocks
@@ -2855,6 +3136,20 @@ func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 		if len(finalMsgs) > 0 && finalMsgs[len(finalMsgs)-1].Role == role && !isToolRelated && finalMsgs[len(finalMsgs)-1].ToolCall == nil && finalMsgs[len(finalMsgs)-1].ToolResult == nil {
 			finalMsgs[len(finalMsgs)-1].Content += "\n\n" + content
 		} else {
+			// If we were buffering system notes and now we have a non-interjecting message,
+			// or if this is a function result (which must follow the call),
+			// decide where to put the buffer.
+			if len(systemNoteBuffer) > 0 && role != "function" {
+				// Flush buffer as a user message before this one
+				notes := strings.Join(systemNoteBuffer, "\n\n")
+				if role == "user" {
+					content = notes + "\n\n" + content
+				} else {
+					finalMsgs = append(finalMsgs, ChatMessage{Role: "user", Content: notes, Timestamp: time.Now()})
+				}
+				systemNoteBuffer = nil
+			}
+
 			finalMsgs = append(finalMsgs, ChatMessage{
 				Role:       role,
 				Content:    content,
@@ -2862,7 +3157,21 @@ func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 				ToolCall:   m.ToolCall,
 				ToolResult: m.ToolResult,
 			})
+
+			// If we just added a tool result and have buffered notes, flush them AFTER the result turn
+			if len(systemNoteBuffer) > 0 && role == "function" {
+				// We need to wait for all parts of the function response if there are multiple?
+				// Actually, Gemini allows multiple function results in one turn, but they are separate messages in our ToolHistory.
+				// For now, we'll flush after the first result we see that isn't followed by another result?
+				// Simple approach: flush after EVERY function result if the NEXT message isn't also a function result.
+				// But we are in a loop.
+			}
 		}
+	}
+
+	// Flush any remaining buffered notes
+	if len(systemNoteBuffer) > 0 {
+		finalMsgs = append(finalMsgs, ChatMessage{Role: "user", Content: strings.Join(systemNoteBuffer, "\n\n"), Timestamp: time.Now()})
 	}
 
 	return finalMsgs
@@ -2871,15 +3180,72 @@ func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
 	session.TurnMutex.Lock()
 	defer session.TurnMutex.Unlock()
+	return streamLLMAndTTSInternal(ctx, prompt, ws, session, false)
+}
 
+func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession, isFallback bool) error {
 	// Per-client per-model rate limiting
 	session.Mutex.Lock()
 	model := session.Model
+	origModel := session.FallbackOriginalModel
+	origProvider := session.FallbackOriginalProvider
 	session.Mutex.Unlock()
 
+	// 1. Recovery Logic: If we are currently on a fallback, check if original model is now available
+	// Skip recovery if we are currently in a recursive fallback turn to avoid immediate loops.
+	if !isFallback && origModel != "" {
+		_, err := session.checkRateLimitUnsafe(origModel)
+		if err == nil {
+			log.Printf("[LLM] Rate limits for %s have reset. Restoring original model for client %s.", origModel, session.ClientID)
+			session.Mutex.Lock()
+			session.Model = origModel
+			session.Provider = origProvider
+			session.FallbackOriginalModel = ""
+			session.FallbackOriginalProvider = ""
+			t := session.ActiveThread()
+			session.appendMessage("system", fmt.Sprintf("[System Note: Rate limits for %s have reset. Restoring your preferred model.]", origModel), t)
+			session.Mutex.Unlock()
+			model = origModel // Continue with restored model
+			saveSession(session)
+		} else {
+			log.Printf("[LLM] Original model %s is still rate-limited: %v", origModel, err)
+		}
+	}
+
+	// 2. Rate Limit Check
 	warning, err := session.checkRateLimit(model)
 	if err != nil {
 		log.Printf("[LLM] Rate limit exceeded for client %s model %s: %v", session.ClientID, model, err)
+
+		// 3. Fallback Logic: Try to find a fallback if current model is limited
+		fallbackProvider, fallbackModel := selectFallbackModel()
+		if fallbackProvider != "" && fallbackModel != model {
+			session.Mutex.Lock()
+			// Remember original if not already in fallback state
+			if session.FallbackOriginalModel == "" {
+				session.FallbackOriginalModel = model
+				session.FallbackOriginalProvider = session.Provider
+			}
+			session.Model = fallbackModel
+			session.Provider = fallbackProvider
+			t := session.ActiveThread()
+			msg := fmt.Sprintf("[Rate Limit hit for %s]: %v. Switching to fallback %s %s until limits reset.", model, err, fallbackProvider, fallbackModel)
+			session.appendMessage("system", msg, t)
+			session.Mutex.Unlock()
+			log.Printf("[LLM] %s", msg)
+
+			// Process session saving and audio notification asynchronously to reduce latency
+			// for starting the fallback LLM request.
+			go func(s *ClientSession, m string, conn *websocket.Conn) {
+				saveSession(s)
+				injectSystemAudio(m, conn, s)
+			}(session, "Just a head's up, we've hit a rate limits on youre selected LLM! We're going to fail over to local processing for a bit", ws)
+
+			// Recurse to use the new fallback model (pass isFallback=true to skip recovery check)
+			return streamLLMAndTTSInternal(ctx, prompt, ws, session, true)
+		}
+
+		// If no fallback available, block as before
 		session.Mutex.Lock()
 		t := session.ActiveThread()
 		session.appendMessage("system", "[Rate Limit]: "+err.Error(), t)
@@ -2938,7 +3304,12 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	saveCalculatedSystemPrompt(session, sysContent)
 
 	t := session.ActiveThread()
-	contextMsgs := session.getLLMContext(t)
+	// Native tools are only supported for official Gemini models; others (Gemma, Llama)
+	// get a redirected system prompt and no tool access to improve reliability.
+	isToolModel := strings.Contains(strings.ToLower(model), "gemini") &&
+		!strings.Contains(strings.ToLower(model), "gemma") &&
+		!strings.Contains(strings.ToLower(model), "llama")
+	contextMsgs := session.getLLMContext(t, isToolModel)
 	formattedHistory := prepareLLMHistory(contextMsgs, "gemini")
 
 	type Part struct {
@@ -2985,16 +3356,19 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	session.Mutex.Unlock()
 
 	geminiTools := getNativeToolsGemini(session)
-	isGeminiModel := strings.Contains(strings.ToLower(model), "gemini")
+	isGeminiToolModel := strings.Contains(strings.ToLower(model), "gemini") &&
+		!strings.Contains(strings.ToLower(model), "gemma") &&
+		!strings.Contains(strings.ToLower(model), "llama")
 
-	if !isGeminiModel {
-		log.Printf("[Gemini] Model %s does not contain 'gemini' in name — stripping tools and adapting system instruction", model)
+	if !isGeminiToolModel {
+		log.Printf("[Gemini] Model %s is not a native tool model — stripping tools and adapting system instruction", model)
 		geminiTools = nil
-		// For non-Gemini models, we prepend instructions to the LAST turn (current user prompt)
-		// to enforce recency/adherence.
+		// For non-native-tool models, we prepend instructions to the FIRST turn
+		// to ensure the model sees the instructions before the conversational history.
 		if len(contents) > 0 {
-			lastIdx := len(contents) - 1
-			contents[lastIdx].Parts[0].Text = "[SYSTEM_INSTRUCTION]:\n" + sysContent + "\n\n" + contents[lastIdx].Parts[0].Text
+			// Prepend to the first turn to ensure the model sees the instructions before the context
+			// and adheres to standard prompt engineering for models without native system roles.
+			contents[0].Parts[0].Text = "[SYSTEM_INSTRUCTION]:\n" + sysContent + "\n\n" + contents[0].Parts[0].Text
 		} else {
 			contents = append(contents, Content{Role: "user", Parts: []Part{{Text: "[SYSTEM_INSTRUCTION]:\n" + sysContent}}})
 		}
@@ -3010,7 +3384,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 		},
 	}
-	if isGeminiModel {
+	if isGeminiToolModel {
 		payload["system_instruction"] = map[string]interface{}{
 			"parts": []map[string]string{
 				{"text": sysContent},
@@ -3018,6 +3392,13 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		}
 	}
 	body, _ := json.Marshal(payload)
+	// Save last request for debugging (root dir to avoid ClientStorage wipe)
+	lastReqPath := "last-request.json"
+	if err := os.WriteFile(lastReqPath, body, 0644); err != nil {
+		log.Printf("[Gemini] Failed to save debug request: %v", err)
+	} else {
+		log.Printf("[Gemini] Saved debug request to %s", lastReqPath)
+	}
 
 	reqURL := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", model, apiKey)
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
@@ -3074,7 +3455,12 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				session.Provider = fallbackProvider
 				session.Model = fallbackModel
 				session.Mutex.Unlock()
-				saveSession(session)
+
+				// Process session saving and audio notification asynchronously to reduce latency
+				go func(s *ClientSession, m string, conn *websocket.Conn) {
+					saveSession(s)
+					injectSystemAudio(m, conn, s)
+				}(session, "LLM limits hit, failing over to local processing", ws)
 
 				// Recursive call into the fallback provider
 				if fallbackProvider == "ollama" {
@@ -3108,7 +3494,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			session.Mutex.Unlock()
 			if isClientTts {
 				target := ws
-				if target == nil {
+				if target == nil || session.isToolConn(target) {
 					target = getLastActiveUIConn(session)
 				}
 				if target != nil {
@@ -3120,7 +3506,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					log.Println("Gemini TTS Worker Error:", err)
 				} else if ctx.Err() == nil {
 					target := ws
-					if target == nil {
+					if target == nil || session.isToolConn(target) {
 						target = getLastActiveUIConn(session)
 					}
 					if target != nil {
@@ -3310,7 +3696,8 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	saveCalculatedSystemPrompt(session, sysContent)
 
 	t := session.ActiveThread()
-	contextMsgs := session.getLLMContext(t)
+	ollamaSupportsTools := ollamaModelSupportsTools(model)
+	contextMsgs := session.getLLMContext(t, ollamaSupportsTools)
 	formattedHistory := prepareLLMHistory(contextMsgs, "ollama")
 
 	var ollamaMsgs []map[string]interface{}
@@ -3421,7 +3808,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			session.Mutex.Unlock()
 			if isClientTts {
 				target := ws
-				if target == nil {
+				if target == nil || session.isToolConn(target) {
 					target = getLastActiveUIConn(session)
 				}
 				if target != nil {
@@ -3433,7 +3820,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					log.Println("Ollama TTS Worker Error:", err)
 				} else if ctx.Err() == nil {
 					target := ws
-					if target == nil {
+					if target == nil || session.isToolConn(target) {
 						target = getLastActiveUIConn(session)
 					}
 					if target != nil {
@@ -3787,6 +4174,39 @@ func isCommonAbbreviation(word string) bool {
 	return false
 }
 
+func injectSystemAudio(text string, ws *websocket.Conn, session *ClientSession) {
+	session.Mutex.Lock()
+	voice := session.Voice
+	userName := session.UserName
+	isClientTts := session.ClientTts
+	session.Mutex.Unlock()
+
+	if isClientTts {
+		// Send as text for client-side TTS
+		target := ws
+		if target == nil {
+			target = getLastActiveUIConn(session)
+		}
+		if target != nil {
+			safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
+		}
+	} else {
+		// Generate on server and send binary
+		audioBytes, err := queryTTS(text, voice, userName)
+		if err == nil {
+			target := ws
+			if target == nil {
+				target = getLastActiveUIConn(session)
+			}
+			if target != nil {
+				safeWrite(target, session, websocket.BinaryMessage, audioBytes)
+			}
+		} else {
+			log.Printf("[SystemAudio] TTS generation failed: %v", err)
+		}
+	}
+}
+
 func queryTTS(text string, voiceFile string, userName string) ([]byte, error) {
 	text = sanitiseTTSText(text, userName)
 	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s", text, voiceFile)
@@ -3936,6 +4356,30 @@ func handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+}
+
+func cacheModelsAsync(apiKey string) {
+	go func() {
+		ctxDir := filepath.Join(".", "context")
+		os.MkdirAll(ctxDir, 0755)
+
+		// Gemini
+		if apiKey != "" {
+			models := getGeminiModelsInternal(apiKey, true) // Admin mode to fetch all
+			if len(models) > 0 {
+				data, _ := json.MarshalIndent(models, "", "  ")
+				os.WriteFile(filepath.Join(ctxDir, "gemini-models.json"), data, 0644)
+			}
+		}
+
+		// Ollama
+		models := getOllamaModelsInternal(true) // Admin mode to fetch all
+		if len(models) > 0 {
+			data, _ := json.MarshalIndent(models, "", "  ")
+			os.WriteFile(filepath.Join(ctxDir, "ollama-models.json"), data, 0644)
+		}
+		log.Println("[Models] Background model list caching complete")
+	}()
 }
 
 type ModelData struct {
