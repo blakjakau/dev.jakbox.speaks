@@ -17,6 +17,13 @@ import com.k2fsa.sherpa.onnx.*
 
 data class UiMessage(val role: String, val content: String)
 data class ThreadItem(val id: String, val name: String)
+data class SpeaxThemeData(
+    val primary: String,
+    val secondary: String,
+    val tertiary: String,
+    val background: String,
+    val panel: String
+)
 
 /**
  * Central manager for Speax state, audio, and WebSocket connection.
@@ -59,6 +66,7 @@ object SpeaxManager {
     var passiveAssistant by mutableStateOf(false)
     var useNativeStt by mutableStateOf(false)
     var isNativeSttSupported by mutableStateOf(false)
+    var currentTheme by mutableStateOf<SpeaxThemeData?>(null)
 
     var availableModels = mutableStateListOf<String>()
     var isLoadingModels by mutableStateOf(false)
@@ -518,6 +526,19 @@ object SpeaxManager {
                                 tokenUsage[k] = tu.optLong(k, 0L)
                             }
                         }
+                        val themeObj = s.optJSONObject("theme")
+                        if (themeObj != null) {
+                            currentTheme = SpeaxThemeData(
+                                primary = themeObj.optString("primary", "#0E639C"),
+                                secondary = themeObj.optString("secondary", "#00D1C1"),
+                                tertiary = themeObj.optString("tertiary", "#005A53"),
+                                background = themeObj.optString("background", "#051329"),
+                                panel = themeObj.optString("panel", "#0B1E36")
+                            )
+                        } else {
+                            currentTheme = null
+                        }
+
                         saveSettingsLocal()
                         fetchModels()
                         fetchVoices()

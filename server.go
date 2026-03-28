@@ -33,6 +33,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func generateID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
+
 type FallbackLLMConfig struct {
 	URL    string   `json:"URL"`
 	Models []string `json:"Models"`
@@ -549,11 +555,13 @@ var (
 )
 
 type NativeToolCall struct {
+	ID   string                 `json:"id,omitempty"`
 	Name string                 `json:"name"`
 	Args map[string]interface{} `json:"args"`
 }
 
 type NativeToolResult struct {
+	ID     string `json:"id,omitempty"`
 	Name   string `json:"name"`
 	Result string `json:"result"`
 }
@@ -688,25 +696,29 @@ func (s *ClientSession) appendMessage(role, content string, thread *Thread) {
 	thread.History = append(thread.History, msg)
 }
 
-func (s *ClientSession) appendNativeToolCall(nativeName string, args map[string]interface{}, thread *Thread) {
+func (s *ClientSession) appendNativeToolCall(nativeName string, args map[string]interface{}, thread *Thread) string {
+	id := generateID()
 	msg := ChatMessage{
 		Role:      "assistant",
 		Content:   fmt.Sprintf("[NATIVE_TOOL_CALL: %s]", nativeName),
 		Timestamp: time.Now(),
 		ToolCall: &NativeToolCall{
+			ID:   id,
 			Name: nativeName,
 			Args: args,
 		},
 	}
 	thread.History = append(thread.History, msg)
+	return id
 }
 
-func (s *ClientSession) appendNativeToolResult(nativeName string, result string, thread *Thread) {
+func (s *ClientSession) appendNativeToolResult(nativeName string, result string, thread *Thread, id string) {
 	msg := ChatMessage{
 		Role:      "tool",
 		Content:   result,
 		Timestamp: time.Now(),
 		ToolResult: &NativeToolResult{
+			ID:     id,
 			Name:   nativeName,
 			Result: result,
 		},
@@ -722,36 +734,110 @@ func (s *ClientSession) appendNativeToolResult(nativeName string, result string,
 func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []ChatMessage {
 	var ctxMsgs []ChatMessage
 
-	// Collect last 20 from SystemLog
+	// 1. Collect last 20 from SystemLog
 	startIdx := len(s.SystemLog) - 20
 	if startIdx < 0 {
 		startIdx = 0
 	}
 	ctxMsgs = append(ctxMsgs, s.SystemLog[startIdx:]...)
 
-	// Collect last 10 from ToolHistory — only if the model supports tool calling
-	if supportsTools {
-		startIdx = len(thread.ToolHistory) - 10
-		if startIdx < 0 {
-			startIdx = 0
+	// 2. Map results by ID for deterministic matching.
+	resultsByID := make(map[string]ChatMessage)
+	for _, rm := range thread.ToolHistory {
+		if rm.ToolResult != nil && rm.ToolResult.ID != "" {
+			resultsByID[rm.ToolResult.ID] = rm
 		}
-		ctxMsgs = append(ctxMsgs, thread.ToolHistory[startIdx:]...)
 	}
 
-	// Collect all from History - filter out tool-related calls/results if not supported
+	// 3. Collect from History and match tool pairs.
+	// We'll first identity all potential pairs.
+	type toolPair struct {
+		call   ChatMessage
+		result ChatMessage
+	}
+	var pairs []toolPair
+	var historyWithoutTools []ChatMessage
+
 	for _, m := range thread.History {
-		if !supportsTools && (m.ToolCall != nil || m.ToolResult != nil) {
+		if m.ToolCall != nil && supportsTools {
+			if res, ok := resultsByID[m.ToolCall.ID]; ok {
+				pairs = append(pairs, toolPair{call: m, result: res})
+				continue
+			}
+		}
+		// If it's a tool-related result turn in history (unlikely pattern but safe)
+		if m.ToolResult != nil {
 			continue
 		}
-		ctxMsgs = append(ctxMsgs, m)
+		// Otherwise keep as regular history
+		historyWithoutTools = append(historyWithoutTools, m)
 	}
 
-	// Sort chronologically
-	sort.Slice(ctxMsgs, func(i, j int) bool {
+	// 4. Filter to last 3 pairs
+	if len(pairs) > 3 {
+		// Downgrade older pairs to plain text history turns before discarding structured data
+		for _, p := range pairs[:len(pairs)-3] {
+			p.call.ToolCall = nil // Strip structured data
+			historyWithoutTools = append(historyWithoutTools, p.call)
+		}
+		pairs = pairs[len(pairs)-3:]
+	}
+
+	// 5. Build final context messages
+	ctxMsgs = append(ctxMsgs, historyWithoutTools...)
+	for _, p := range pairs {
+		// Re-stamp results to follow calls by 1ms for stable sorting
+		p.result.Timestamp = p.call.Timestamp.Add(1 * time.Millisecond)
+		ctxMsgs = append(ctxMsgs, p.call, p.result)
+	}
+
+	// 6. Sort chronologically (stable sort)
+	sort.SliceStable(ctxMsgs, func(i, j int) bool {
+		if ctxMsgs[i].Timestamp.Equal(ctxMsgs[j].Timestamp) {
+			if ctxMsgs[i].ToolCall != nil && ctxMsgs[j].ToolResult != nil {
+				return true
+			}
+			if ctxMsgs[i].ToolResult != nil && ctxMsgs[j].ToolCall != nil {
+				return false
+			}
+		}
 		return ctxMsgs[i].Timestamp.Before(ctxMsgs[j].Timestamp)
 	})
 
-	return ctxMsgs
+	// 7. Post-process to fix interjecting system messages
+	var finalized []ChatMessage
+	var systemBuffer []ChatMessage
+	var inToolSequence bool
+
+	for _, m := range ctxMsgs {
+		isSystem := m.Role == "system" || (m.Role == "user" && strings.HasPrefix(m.Content, "[System Note]"))
+
+		if isSystem {
+			if inToolSequence {
+				systemBuffer = append(systemBuffer, m)
+			} else {
+				finalized = append(finalized, m)
+			}
+			continue
+		}
+
+		if m.ToolCall != nil || m.ToolResult != nil {
+			inToolSequence = true
+		} else {
+			if len(systemBuffer) > 0 {
+				finalized = append(finalized, systemBuffer...)
+				systemBuffer = nil
+			}
+			inToolSequence = false
+		}
+		finalized = append(finalized, m)
+	}
+
+	if len(systemBuffer) > 0 {
+		finalized = append(finalized, systemBuffer...)
+	}
+
+	return finalized
 }
 
 func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Time) bool {
@@ -1885,7 +1971,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					}
 					resultJson, _ := json.Marshal(resultDetails)
 					nativeName := fmt.Sprintf("%s_%s", result.ToolName, result.ActionName)
-					session.appendNativeToolResult(nativeName, string(resultJson), t)
+					session.appendNativeToolResult(nativeName, string(resultJson), t, result.ExecutionId)
 					session.Mutex.Unlock()
 					saveSession(session)
 
@@ -2659,14 +2745,14 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		}
 
 		session.Mutex.Lock()
-		session.appendNativeToolCall(nativeName, args, session.ActiveThread())
+		id := session.appendNativeToolCall(nativeName, args, session.ActiveThread())
 		var result string
 		if err != nil {
 			result = fmt.Sprintf("{\"error\": \"%v\"}", err)
 		} else {
 			result = fmt.Sprintf("{\"status\": \"success\", \"message\": \"%s\"}", statusMsg)
 		}
-		session.appendNativeToolResult(nativeName, result, session.ActiveThread())
+		session.appendNativeToolResult(nativeName, result, session.ActiveThread(), id)
 		session.Mutex.Unlock()
 
 		// Trigger auto-resume
@@ -2689,7 +2775,10 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		return
 	}
 
-	// External tools
+	session.Mutex.Lock()
+	id := session.appendNativeToolCall(nativeName, args, session.ActiveThread())
+	session.Mutex.Unlock()
+
 	toolCall := struct {
 		ToolName    string      `json:"toolName"`
 		ActionName  string      `json:"actionName"`
@@ -2698,13 +2787,9 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 	}{
 		ToolName:    toolName,
 		ActionName:  actionName,
-		ExecutionId: executionId,
+		ExecutionId: id,
 		Params:      args,
 	}
-
-	session.Mutex.Lock()
-	session.appendNativeToolCall(nativeName, args, session.ActiveThread())
-	session.Mutex.Unlock()
 
 	executePayload, _ := json.Marshal(toolCall)
 	err := targetToolClient(session, toolName, []byte("[TOOL_EXECUTE]"+string(executePayload)))
@@ -2712,7 +2797,7 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		log.Printf("Failed to route native tool call: %v", err)
 		session.Mutex.Lock()
 		errMsg := "{\"error\": \"Client disconnected or not found\"}"
-		session.appendNativeToolResult(nativeName, errMsg, session.ActiveThread())
+		session.appendNativeToolResult(nativeName, errMsg, session.ActiveThread(), id)
 		session.Mutex.Unlock()
 	}
 }
@@ -3093,6 +3178,15 @@ func saveCalculatedSystemPrompt(session *ClientSession, content string) {
 	os.WriteFile(promptPath, []byte(content), 0644)
 }
 
+func saveCalculatedContentWindow(session *ClientSession, body []byte) {
+	// 1. Root-level for easy debugging as requested
+	os.WriteFile("last-request.json", body, 0644)
+
+	// 2. Per-client for long-term reference
+	windowPath := filepath.Join(getContextDir(session.ClientID), "calculated-content-window.json")
+	os.WriteFile(windowPath, body, 0644)
+}
+
 func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 	var finalMsgs []ChatMessage
 	var systemNoteBuffer []string
@@ -3324,27 +3418,33 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 	var contents []Content
 	for _, msg := range formattedHistory {
-		var parts []Part
+		var p Part
 		if msg.ToolCall != nil {
-			parts = append(parts, Part{
+			p = Part{
 				FunctionCall: map[string]interface{}{
 					"name": msg.ToolCall.Name,
 					"args": msg.ToolCall.Args,
 				},
-			})
+			}
 		} else if msg.ToolResult != nil {
-			parts = append(parts, Part{
+			p = Part{
 				FunctionResponse: map[string]interface{}{
 					"name": msg.ToolResult.Name,
 					"response": map[string]interface{}{
 						"result": msg.ToolResult.Result,
 					},
 				},
-			})
+			}
 		} else {
-			parts = append(parts, Part{Text: msg.Content})
+			p = Part{Text: msg.Content}
 		}
-		contents = append(contents, Content{Role: msg.Role, Parts: parts})
+
+		// Merge consecutive turns with the same role (required by Gemini)
+		if len(contents) > 0 && contents[len(contents)-1].Role == msg.Role {
+			contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, p)
+		} else {
+			contents = append(contents, Content{Role: msg.Role, Parts: []Part{p}})
+		}
 	}
 
 	if len(contents) > 0 && contents[len(contents)-1].Role == "user" {
@@ -3391,14 +3491,8 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			},
 		}
 	}
-	body, _ := json.Marshal(payload)
-	// Save last request for debugging (root dir to avoid ClientStorage wipe)
-	lastReqPath := "last-request.json"
-	if err := os.WriteFile(lastReqPath, body, 0644); err != nil {
-		log.Printf("[Gemini] Failed to save debug request: %v", err)
-	} else {
-		log.Printf("[Gemini] Saved debug request to %s", lastReqPath)
-	}
+	body, _ := json.MarshalIndent(payload, "", "  ")
+	saveCalculatedContentWindow(session, body)
 
 	reqURL := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", model, apiKey)
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewReader(body))
@@ -3749,7 +3843,8 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	if len(ollamaTools) > 0 {
 		payload["tools"] = ollamaTools
 	}
-	body, _ := json.Marshal(payload)
+	body, _ := json.MarshalIndent(payload, "", "  ")
+	saveCalculatedContentWindow(session, body)
 
 	configMutex.RLock()
 	ollamaChatURLs := config.OllamaChatURL

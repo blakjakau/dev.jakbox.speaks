@@ -651,11 +651,26 @@ fun ChatScreen() {
     var newThreadName by remember { mutableStateOf("") }
 
         val isImeVisible = WindowInsets.isImeVisible
-    val isDark = isSystemInDarkTheme()
-    val bgGradient = if (isDark) {
+    val isDark = isSystemInDarkTheme() || SpeaxManager.currentTheme != null
+    val bgColor = MaterialTheme.colorScheme.background
+    val panelColor = MaterialTheme.colorScheme.surface
+    
+    val bgGradient = if (SpeaxManager.currentTheme != null) {
+        val top = bgColor.desaturate(0.4f).mix(Color.Black, 0.15f)
+        val bottom = bgColor
+        Brush.verticalGradient(listOf(top, bottom))
+    } else if (isDark) {
         Brush.verticalGradient(listOf(Color(0xFF051329), Color(0xFF010308)))
     } else {
-        Brush.verticalGradient(listOf(Color(0xFFE3EDF7), Color(0xFFF5F7FA))) // Airy light gradient
+        Brush.verticalGradient(listOf(Color(0xFFE3EDF7), Color(0xFFF5F7FA)))
+    }
+
+    val panelGradient = if (SpeaxManager.currentTheme != null) {
+        val top = panelColor
+        val bottom = panelColor.desaturate(0.15f).mix(Color.White, 0.15f).copy(alpha = 0.7f)
+        Brush.verticalGradient(listOf(top, bottom))
+    } else {
+        Brush.verticalGradient(listOf(panelColor, panelColor))
     }
 
         // Auto-scroll to bottom when new text arrives or the keyboard opens
@@ -985,7 +1000,7 @@ fun ChatScreen() {
                         .consumeWindowInsets(innerPadding)
                         .imePadding()
                     .padding(horizontal = 12.dp)
-                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+                    .background(panelGradient, RoundedCornerShape(8.dp))
                     .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
                     .clip(RoundedCornerShape(8.dp))
             ) {
