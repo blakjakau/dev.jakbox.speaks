@@ -31,6 +31,7 @@ import (
 	"unicode"
 
 	"github.com/gorilla/websocket"
+	"speaks.jakbox.dev/tts"
 )
 
 func generateID() string {
@@ -488,14 +489,15 @@ type PersonaTheme struct {
 }
 
 type Persona struct {
-	Name             string       `json:"name"`
-	NameMutations    string       `json:"name_mutations"`
-	Tone             string       `json:"tone"`
-	AddressStyle     string       `json:"address_style"`
-	Focus            string       `json:"focus"`
-	InteractionStyle string       `json:"interaction_style"`
-	Constraints      string       `json:"constraints"`
-	Theme            PersonaTheme `json:"theme"`
+	Name                  string       `json:"name"`
+	NameMutations         string       `json:"name_mutations"`
+	PhoneticPronunciation string       `json:"phonetic_pronunciation"`
+	Tone                  string       `json:"tone"`
+	AddressStyle          string       `json:"address_style"`
+	Focus                 string       `json:"focus"`
+	InteractionStyle      string       `json:"interaction_style"`
+	Constraints           string       `json:"constraints"`
+	Theme                 PersonaTheme `json:"theme"`
 }
 
 var (
@@ -542,7 +544,25 @@ func watchPersonas(path string) {
 				if err := loadPersonas(path); err != nil {
 					log.Printf("FAILED to reload personas: %v (Update ignored)", err)
 				} else {
-					log.Println("Personas successfully reloaded")
+					log.Println("Personas successfully reloaded, updating active sessions...")
+					activeSessionsMutex.Lock()
+					for _, session := range activeSessions {
+						session.Mutex.Lock()
+						if session.Voice != "" {
+							vName := strings.ToLower(extractVoiceName(session.Voice))
+							personasMutex.RLock()
+							if p, ok := personas[vName]; ok {
+								if session.Theme != p.Theme {
+									session.Theme = p.Theme
+									log.Printf("Updated theme for session %s (voice: %s)", session.ClientID, vName)
+								}
+							}
+							personasMutex.RUnlock()
+						}
+						session.Mutex.Unlock()
+						sendSettings(nil, session) // Broadcast updated settings (including theme)
+					}
+					activeSessionsMutex.Unlock()
 				}
 			}
 		}
@@ -762,8 +782,10 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 		if m.ToolCall != nil && supportsTools {
 			if res, ok := resultsByID[m.ToolCall.ID]; ok {
 				pairs = append(pairs, toolPair{call: m, result: res})
-				continue
 			}
+			// Strict exclusion: if it was a tool call (paired or not), we skip regular history append.
+			// Unpaired calls are effectively removed from the context.
+			continue
 		}
 		// If it's a tool-related result turn in history (unlikely pattern but safe)
 		if m.ToolResult != nil {
@@ -775,11 +797,6 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 
 	// 4. Filter to last 3 pairs
 	if len(pairs) > 3 {
-		// Downgrade older pairs to plain text history turns before discarding structured data
-		for _, p := range pairs[:len(pairs)-3] {
-			p.call.ToolCall = nil // Strip structured data
-			historyWithoutTools = append(historyWithoutTools, p.call)
-		}
 		pairs = pairs[len(pairs)-3:]
 	}
 
@@ -2301,7 +2318,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					v = config.DefaultVoice
 					configMutex.RUnlock()
 				}
-				audioBytes, err := queryTTS(t, v, session.UserName)
+				audioBytes, err := queryTTS(t, v, session.UserName, "", "") // System prompts usually don't need phonetic names here unless specific
 				if err != nil {
 					log.Println("TTS error:", err)
 					return
@@ -3397,6 +3414,27 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	sysContent := prepareSystemPrompt(session, model, voiceName, "gemini")
 	saveCalculatedSystemPrompt(session, sysContent)
 
+	// Resolve persona for output sanitisation
+	personaNameLower := strings.ToLower(voiceName)
+	personasMutex.RLock()
+	persona, hasPersona := personas[personaNameLower]
+	personasMutex.RUnlock()
+
+	var mutationRes []*regexp.Regexp
+	targetPersonaName := ""
+	phoneticPersonaName := ""
+	if hasPersona {
+		targetPersonaName = persona.Name
+		phoneticPersonaName = persona.PhoneticPronunciation
+		if persona.NameMutations != "" {
+			muts := strings.Fields(persona.NameMutations)
+			for _, m := range muts {
+				re := regexp.MustCompile("(?i)\\b" + regexp.QuoteMeta(m) + "\\b")
+				mutationRes = append(mutationRes, re)
+			}
+		}
+	}
+
 	t := session.ActiveThread()
 	// Native tools are only supported for official Gemini models; others (Gemma, Llama)
 	// get a redirected system prompt and no tool access to improve reliability.
@@ -3595,7 +3633,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
 				}
 			} else {
-				audioBytes, err := queryTTS(text, voice, effectiveUserName)
+				audioBytes, err := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				if err != nil {
 					log.Println("Gemini TTS Worker Error:", err)
 				} else if ctx.Err() == nil {
@@ -3618,10 +3656,19 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	var sessionRespTokens int64
 	var sessionTokens int64
 
+	firstChunkSent := false
 	flushPendingText := func(text string) {
 		if text == "" {
 			return
 		}
+
+		// Replace persona name mutations with actual name
+		if hasPersona && len(mutationRes) > 0 {
+			for _, re := range mutationRes {
+				text = re.ReplaceAllString(text, targetPersonaName)
+			}
+		}
+
 		sendOrBroadcastText(nil, session, []byte(text))
 		sentence.WriteString(text)
 		fullResponse.WriteString(text)
@@ -3631,7 +3678,15 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 		currentStr := sentence.String()
 
-		splitIdx := findSentenceBoundary(currentStr, 30)
+		minLength := 30
+		hardLimit := 250
+		paragraphOnly := false
+		if firstChunkSent {
+			minLength = 0
+			hardLimit = 1000
+			paragraphOnly = true
+		}
+		splitIdx := findSentenceBoundary(currentStr, minLength, hardLimit, paragraphOnly)
 
 		if splitIdx != -1 {
 
@@ -3642,12 +3697,10 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			ttsText := strings.TrimSpace(chunkToSend)
 
 			if len(ttsText) > 0 {
-
-				normalizedTTS := sanitiseTTSText(ttsText, effectiveUserName)
-
+				normalizedTTS := tts.Sanitise(ttsText, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				select {
-
 				case ttsChan <- normalizedTTS:
+					firstChunkSent = true
 
 				case <-ctx.Done():
 
@@ -3718,7 +3771,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	}
 
 	if cleanChunk := strings.TrimSpace(sentence.String()); len(cleanChunk) > 0 {
-		normalizedTTS := sanitiseTTSText(cleanChunk, effectiveUserName)
+		normalizedTTS := tts.Sanitise(cleanChunk, effectiveUserName, targetPersonaName, phoneticPersonaName)
 		select {
 		case ttsChan <- normalizedTTS:
 		case <-ctx.Done():
@@ -3829,6 +3882,27 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	})
 	session.Mutex.Unlock()
 
+	// Resolve persona for output sanitisation
+	voiceNameLower := strings.ToLower(voiceName)
+	personasMutex.RLock()
+	persona, hasPersona := personas[voiceNameLower]
+	personasMutex.RUnlock()
+
+	var mutationRes []*regexp.Regexp
+	targetPersonaName := ""
+	phoneticPersonaName := ""
+	if hasPersona {
+		targetPersonaName = persona.Name
+		phoneticPersonaName = persona.PhoneticPronunciation
+		if persona.NameMutations != "" {
+			muts := strings.Fields(persona.NameMutations)
+			for _, m := range muts {
+				re := regexp.MustCompile("(?i)\\b" + regexp.QuoteMeta(m) + "\\b")
+				mutationRes = append(mutationRes, re)
+			}
+		}
+	}
+
 	ollamaTools := getNativeToolsOllama(session)
 	if !ollamaModelSupportsTools(model) {
 		log.Printf("[Ollama] Model %s does not support tools — omitting from payload", model)
@@ -3910,7 +3984,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
 				}
 			} else {
-				audioBytes, err := queryTTS(text, voice, effectiveUserName)
+				audioBytes, err := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				if err != nil {
 					log.Println("Ollama TTS Worker Error:", err)
 				} else if ctx.Err() == nil {
@@ -3926,20 +4000,35 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		}
 	}()
 
+	firstChunkSent := false
 	flushPendingText := func(text string) {
 		if text == "" {
 			return
 		}
+
+		// Replace persona name mutations with actual name
+		if hasPersona && len(mutationRes) > 0 {
+			for _, re := range mutationRes {
+				text = re.ReplaceAllString(text, targetPersonaName)
+			}
+		}
+
 		sendOrBroadcastText(nil, session, []byte(text))
 		sentence.WriteString(text)
 		fullResponse.WriteString(text)
 	}
 
 	processTTSSentence := func() {
-
 		currentStr := sentence.String()
-
-		splitIdx := findSentenceBoundary(currentStr, 30)
+		minLength := 30
+		hardLimit := 250
+		paragraphOnly := false
+		if firstChunkSent {
+			minLength = 0
+			hardLimit = 1000
+			paragraphOnly = true
+		}
+		splitIdx := findSentenceBoundary(currentStr, minLength, hardLimit, paragraphOnly)
 
 		if splitIdx != -1 {
 
@@ -3950,12 +4039,10 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			ttsText := strings.TrimSpace(chunkToSend)
 
 			if len(ttsText) > 0 {
-
-				normalizedTTS := sanitiseTTSText(ttsText, effectiveUserName)
-
+				normalizedTTS := tts.Sanitise(ttsText, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				select {
-
 				case ttsChan <- normalizedTTS:
+					firstChunkSent = true
 
 				case <-ctx.Done():
 
@@ -4020,7 +4107,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	}
 
 	if cleanChunk := strings.TrimSpace(sentence.String()); len(cleanChunk) > 0 {
-		normalizedTTS := sanitiseTTSText(cleanChunk, effectiveUserName)
+		normalizedTTS := tts.Sanitise(cleanChunk, effectiveUserName, targetPersonaName, phoneticPersonaName)
 		select {
 		case ttsChan <- normalizedTTS:
 		case <-ctx.Done():
@@ -4179,33 +4266,37 @@ func generateSummaryAsync(messages []ChatMessage, threadID string, session *Clie
 	}
 }
 
-func sanitiseTTSText(text string, userName string) string {
-	// Strip leading comma before names / text — e.g. ", Jason" → " Jason" (improves Piper prosody)
-	if userName != "" {
-		text = strings.ReplaceAll(text, ", "+userName, " "+userName)
+
+func findSentenceBoundary(text string, minLength int, hardLimit int, paragraphOnly bool) int {
+	if paragraphOnly {
+		// Stage 2: Relaxed splitting — prefer paragraph breaks (\n\n)
+		// This allows multiple sentences to be processed as one chunk for better prosody once audio is in-flight.
+		if idx := strings.Index(text, "\n\n"); idx != -1 {
+			return idx + 1 // Split after the first newline
+		}
+		// Fallback: If it's getting excessively long without a paragraph break, split on any boundary near the end.
+		if hardLimit > 0 && len(text) >= hardLimit {
+			for i := len(text) - 1; i >= 0; i-- {
+				c := text[i]
+				if c == '\n' || c == '.' || c == '!' || c == '?' {
+					return i
+				}
+			}
+			return len(text) - 1 // Last resort hard split
+		}
+		return -1
 	}
 
-	// Drop markdown formatting characters that Piper would read aloud verbatim
-	mdRe := regexp.MustCompile("[*_`#~]")
-	text = mdRe.ReplaceAllString(text, "")
-
-	// Handle numbered lists: "1. " -> "1 " at start of line or after whitespace
-	// This helps Piper prosody (treats it like a label rather than a sentence end)
-	listRe := regexp.MustCompile(`(?m)(^\d+)\. `)
-	text = listRe.ReplaceAllString(text, "$1 ")
-
-	// Collapse any runs of whitespace left behind
-	wsRe := regexp.MustCompile(`\s{2,}`)
-	text = wsRe.ReplaceAllString(text, " ")
-
-	return strings.TrimSpace(text)
-}
-
-func findSentenceBoundary(text string, minLength int) int {
+	// Stage 1: Aggressive splitting to minimize time-to-first-audio
 	if idx := strings.Index(text, "\n"); idx != -1 {
 		return idx
 	}
+
 	if len(text) < minLength {
+		// Even if shorter than minLength, respect the hard limit
+		if hardLimit > 0 && len(text) >= hardLimit {
+			return len(text) - 1
+		}
 		return -1
 	}
 
@@ -4223,7 +4314,7 @@ func findSentenceBoundary(text string, minLength int) int {
 			}
 
 			if c == '.' {
-				// 1. Avoid decimals (e.g. "v1.0") - check if preceded by digit and followed by digit (across the space if any?)
+				// 1. Avoid decimals (e.g. "v1.0") - check if preceded by digit and followed by digit
 				// 2. Numbered list check: "[LINE_START][NUMBER]. "
 				wordStart := i
 				for wordStart > 0 && !unicode.IsSpace(rune(text[wordStart-1])) {
@@ -4231,10 +4322,7 @@ func findSentenceBoundary(text string, minLength int) int {
 				}
 				word := text[wordStart:i]
 
-				// If the "word" is just a number, it's a list or a decimal-start.
 				if isNumeric(word) {
-					// It's something like "1." or "123."
-					// If wordStart == 0 or text[wordStart-1] == '\n', it's a list start.
 					if wordStart == 0 || text[wordStart-1] == '\n' {
 						continue // Don't split on "1. " at line start
 					}
@@ -4249,6 +4337,12 @@ func findSentenceBoundary(text string, minLength int) int {
 			return i
 		}
 	}
+
+	// Hard limit fallback for Stage 1
+	if hardLimit > 0 && len(text) >= hardLimit {
+		return len(text) - 1
+	}
+
 	return -1
 }
 
@@ -4276,8 +4370,28 @@ func injectSystemAudio(text string, ws *websocket.Conn, session *ClientSession) 
 	isClientTts := session.ClientTts
 	session.Mutex.Unlock()
 
+	// Resolve persona for TTS enhancements
+	voiceName := extractVoiceName(voice)
+	personaNameLower := strings.ToLower(voiceName)
+	personasMutex.RLock()
+	persona, hasPersona := personas[personaNameLower]
+	personasMutex.RUnlock()
+
+	targetPersonaName := ""
+	phoneticPersonaName := ""
+	if hasPersona {
+		targetPersonaName = persona.Name
+		phoneticPersonaName = persona.PhoneticPronunciation
+	}
+
 	if isClientTts {
 		// Send as text for client-side TTS
+		msg := "[TTS_CHUNK]" + text
+		// Apply phonetic substitution if available for client TTS too (since it's for speech)
+		if phoneticPersonaName != "" {
+			re := regexp.MustCompile("(?i)\\b" + regexp.QuoteMeta(targetPersonaName) + "\\b")
+			msg = re.ReplaceAllString(msg, phoneticPersonaName)
+		}
 		target := ws
 		if target == nil {
 			target = getLastActiveUIConn(session)
@@ -4287,7 +4401,7 @@ func injectSystemAudio(text string, ws *websocket.Conn, session *ClientSession) 
 		}
 	} else {
 		// Generate on server and send binary
-		audioBytes, err := queryTTS(text, voice, userName)
+		audioBytes, err := queryTTS(text, voice, userName, targetPersonaName, phoneticPersonaName)
 		if err == nil {
 			target := ws
 			if target == nil {
@@ -4302,8 +4416,8 @@ func injectSystemAudio(text string, ws *websocket.Conn, session *ClientSession) 
 	}
 }
 
-func queryTTS(text string, voiceFile string, userName string) ([]byte, error) {
-	text = sanitiseTTSText(text, userName)
+func queryTTS(text string, voiceFile string, userName string, personaName string, phoneticName string) ([]byte, error) {
+	text = tts.Sanitise(text, userName, personaName, phoneticName)
 	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s", text, voiceFile)
 	modelPath := filepath.Join(".", "piper", "models", voiceFile)
 	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
