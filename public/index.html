@@ -91,6 +91,7 @@
                             </svg>
                         </button>
                     </div>
+                    <div id="connectText" style="color: var(--text-soft); font-weight: 300; font-size: 1.2em; margin-top: -10px;">Tap to Connect</div>
                     <!-- Pause Button -->
                     <button id="pauseBtn" class="satellite-btn pause" style="display: none;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -126,9 +127,9 @@
             </button>
             <button id="tab-thread" class="tab-btn">
                 <svg class="tab-icon" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z" />
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
-                <span>Thread</span>
+                <span>Chat</span>
             </button>
             <button id="tab-memory" class="tab-btn">
                 <svg class="tab-icon" viewBox="0 0 24 24" fill="currentColor">
@@ -168,6 +169,11 @@
         <div id="threadTabRow" style="display: flex; margin-bottom: 10px; background: var(--slate-dark); border-radius: 8px; padding: 4px;">
             <button id="btnTabGeneral" style="flex: 1; padding: 8px; border: none; border-radius: 6px; background: var(--teal-electric); color: #000; cursor: pointer; font-weight: bold;">General</button>
             <button id="btnTabAssistant" style="flex: 1; padding: 8px; border: none; border-radius: 6px; background: transparent; color: var(--text-soft); cursor: pointer; font-weight: bold;">Assistant</button>
+        </div>
+        <div id="threadSortRow" style="display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-bottom: 8px; padding: 0 4px; font-size: 0.8em; color: var(--text-soft);">
+            <span>Sort:</span>
+            <span id="btnSortActivity" style="cursor: pointer; font-weight: bold; color: var(--teal-electric);">Activity</span>
+            <span id="btnSortAlpha" style="cursor: pointer;">A-Z</span>
         </div>
         <button id="newThreadBtn" class="btn-primary" style="margin: 0; margin-bottom: 10px;">+ New Thread</button>
 

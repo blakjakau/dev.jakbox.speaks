@@ -1,4 +1,7 @@
 package com.jakbox.speax
+ 
+import java.time.Instant
+import java.time.Duration
 
 import android.Manifest
 import android.content.Context
@@ -31,6 +34,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -83,6 +87,27 @@ import android.content.BroadcastReceiver
 import android.content.IntentFilter
 
 // UiMessage and ThreadItem removed (now in SpeaxManager)
+
+fun formatTimeShort(isoString: String?): String {
+    if (isoString.isNullOrBlank()) return ""
+    return try {
+        val instant = Instant.parse(isoString)
+        val now = Instant.now()
+        val diffSecs = Duration.between(instant, now).seconds.coerceAtLeast(0)
+        val diffMins = diffSecs / 60
+        val diffHours = diffMins / 60
+        val diffDays = diffHours / 24
+        val diffWeeks = diffDays / 7
+
+        when {
+            diffWeeks > 0 -> "${diffWeeks}w"
+            diffDays > 0 -> "${diffDays}d"
+            diffHours > 0 -> "${diffHours}h"
+            diffMins > 0 -> "${diffMins}m"
+            else -> "now"
+        }
+    } catch (e: Exception) { "" }
+}
 
 class MainActivity : ComponentActivity() {
 
@@ -876,7 +901,7 @@ fun ChatScreen() {
                         onExpandedChange = { expandedVoiceDropdown = !expandedVoiceDropdown }
                     ) {
                         OutlinedTextField(
-                            value = if (mainActivity.isLoadingVoices) "Loading..." else if (mainActivity.aiVoice.isBlank()) "Select Voice" else SpeaxManager.cleanVoiceName(mainActivity.aiVoice),
+                            value = if (mainActivity.isLoadingVoices) "Loading..." else if (mainActivity.aiVoice.isBlank()) "Select Voice" else SpeaxManager.availableVoices.find { it.id == mainActivity.aiVoice }?.name ?: SpeaxManager.cleanVoiceName(mainActivity.aiVoice),
                             onValueChange = { },
                             readOnly = true,
                             label = { Text("Voice") },
@@ -892,9 +917,9 @@ fun ChatScreen() {
                             } else {
                                 mainActivity.availableVoices.forEach { selectionOption ->
                                     DropdownMenuItem(
-                                        text = { Text(SpeaxManager.cleanVoiceName(selectionOption)) },
+                                        text = { Text(selectionOption.name) },
                                         onClick = {
-                                            mainActivity.aiVoice = "$selectionOption.onnx"
+                                            mainActivity.aiVoice = selectionOption.id
                                             //mainActivity.saveSettings()
                                             mainActivity.pushSettingsToServer()
                                             expandedVoiceDropdown = false
@@ -961,8 +986,8 @@ fun ChatScreen() {
                                 containerColor = MaterialTheme.colorScheme.surface,
                                 tonalElevation = 0.dp
                             ) {
-                                val tabs = listOf("Home", "Thread", "Memory")
-                                val tabIcons = listOf(Icons.Filled.Home, Icons.AutoMirrored.Filled.List, Icons.Filled.Memory)
+                                val tabs = listOf("Home", "Chat", "Memory")
+                                val tabIcons = listOf(Icons.Filled.Home, Icons.AutoMirrored.Filled.Chat, Icons.Filled.Memory)
                                 tabs.forEachIndexed { index, title ->
                                     NavigationBarItem(
                                         icon = { Icon(tabIcons[index], contentDescription = title) },
@@ -989,7 +1014,7 @@ fun ChatScreen() {
                             containerColor = MaterialTheme.colorScheme.surfaceVariant,
                             contentColor = MaterialTheme.colorScheme.onSurface
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "Threads")
+                            Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Threads")
                         }
                     }
                 },
@@ -1044,22 +1069,49 @@ fun ChatScreen() {
                     }
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    var threadTabState by remember { mutableStateOf(0) }
-                    TabRow(selectedTabIndex = threadTabState, containerColor = Color.Transparent) {
-                        Tab(selected = threadTabState == 0, onClick = { threadTabState = 0 }) {
+                    TabRow(selectedTabIndex = SpeaxManager.selectedThreadTab, containerColor = Color.Transparent) {
+                        Tab(selected = SpeaxManager.selectedThreadTab == 0, onClick = { SpeaxManager.selectedThreadTab = 0 }) {
                             Text("General", modifier = Modifier.padding(12.dp), fontSize = 14.sp)
                         }
-                        Tab(selected = threadTabState == 1, onClick = { threadTabState = 1 }) {
+                        Tab(selected = SpeaxManager.selectedThreadTab == 1, onClick = { SpeaxManager.selectedThreadTab = 1 }) {
                             Text("Assistant", modifier = Modifier.padding(12.dp), fontSize = 14.sp)
                         }
                     }
+
                     Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Sort:", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Activity",
+                            fontSize = 12.sp,
+                            fontWeight = if (SpeaxManager.threadSortMode == "timestamp") FontWeight.Bold else FontWeight.Normal,
+                            color = if (SpeaxManager.threadSortMode == "timestamp") MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            modifier = Modifier.clickable { SpeaxManager.threadSortMode = "timestamp"; SpeaxManager.resortThreads() }
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "A-Z",
+                            fontSize = 12.sp,
+                            fontWeight = if (SpeaxManager.threadSortMode == "alphabetical") FontWeight.Bold else FontWeight.Normal,
+                            color = if (SpeaxManager.threadSortMode == "alphabetical") MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            modifier = Modifier.clickable { SpeaxManager.threadSortMode = "alphabetical"; SpeaxManager.resortThreads() }
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
 
                     LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
                         val filteredThreads = mainActivity.availableThreads.filter { t ->
-                            if (threadTabState == 0) !t.id.startsWith("assistant/")
+                            if (SpeaxManager.selectedThreadTab == 0) !t.id.startsWith("assistant/")
                             else t.id.startsWith("assistant/")
                         }
+
                         if (filteredThreads.isEmpty()) {
                             item {
                                 Box(modifier = Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
@@ -1074,7 +1126,8 @@ fun ChatScreen() {
                             ) {
                                 TextButton(
                                     onClick = { mainActivity.switchThread(t.id); showThreadsSheet = false },
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                                 ) {
                                     Text(
                                         text = t.name,
@@ -1084,7 +1137,13 @@ fun ChatScreen() {
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                TextButton(onClick = { mainActivity.deleteThread(t.id) }) {
+                                Text(
+                                    text = formatTimeShort(t.updatedAt.ifBlank { t.createdAt }),
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                    modifier = Modifier.padding(horizontal = 4.dp)
+                                )
+                                TextButton(onClick = { mainActivity.deleteThread(t.id) }, contentPadding = PaddingValues(0.dp), modifier = Modifier.size(32.dp)) {
                                     Text("X", color = Color(0xFFD16969), fontWeight = FontWeight.Bold)
                                 }
                             }

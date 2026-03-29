@@ -24,6 +24,11 @@ import androidx.compose.foundation.border
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.FloatingActionButtonDefaults
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -147,6 +152,8 @@ class AlyxVoiceInteractionSession(context: Context) : VoiceInteractionSession(co
         }
 
         val statusText = SpeaxManager.statusText
+        val configuration = LocalConfiguration.current
+        val shiftAmount = configuration.screenHeightDp.dp * 0.15f
         
         Box(
             modifier = Modifier
@@ -154,81 +161,56 @@ class AlyxVoiceInteractionSession(context: Context) : VoiceInteractionSession(co
                 .background(ComposeColor.Black.copy(alpha = 0.75f)),
             contentAlignment = Alignment.Center
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-                modifier = Modifier.fillMaxSize()
-            ) {
-                // Central Pulse Area
-                Box(contentAlignment = Alignment.Center) {
-                    // AI Pulsing Glow
-                    AiPulsingGlow(
-                        intensityProvider = { aiAnimatedIntensity.floatValue },
-                        modifier = Modifier.size(240.dp)
-                    )
-                    
-                    // Main Logo Disc with Scale Transform
-                    // Match the size and color of the main app button (160dp, primary color)
-                    Box(
-                        modifier = Modifier
-                            .size(160.dp)
-                            .background(
-                                if (SpeaxManager.isConnected) MaterialTheme.colorScheme.primary 
-                                else ComposeColor.White.copy(alpha = 0.08f), 
-                                CircleShape
-                            )
-                            .border(
-                                if (SpeaxManager.isConnected) 0.dp else 1.dp, 
-                                ComposeColor.White.copy(alpha = 0.15f), 
-                                CircleShape
-                            )
-                            .graphicsLayer {
-                                val scale = 1f + (aiAnimatedIntensity.floatValue * 0.15f)
-                                scaleX = scale
-                                scaleY = scale
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        AlyxLogo(
-                            modifier = Modifier.size(80.dp),
-                            tint = if (SpeaxManager.isConnected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.5f)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(48.dp))
-
-                Text(
-                    text = statusText,
-                    color = ComposeColor.White,
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Light,
-                    modifier = Modifier.padding(horizontal = 32.dp)
+            Box(contentAlignment = Alignment.Center) {
+                // AI Pulsing Glow
+                AiPulsingGlow(
+                    intensityProvider = { aiAnimatedIntensity.floatValue },
+                    modifier = Modifier.size(240.dp).offset(y = -shiftAmount)
                 )
                 
-                if (SpeaxManager.isGeneratingAi) {
-                    Text(
-                        text = "${SpeaxManager.assistantName} is thinking...",
-                        color = ComposeColor.Cyan.copy(alpha = 0.6f),
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(top = 8.dp)
+                // Main Logo Disc
+                Box(
+                    modifier = Modifier
+                        .size(160.dp)
+                        .offset(y = -shiftAmount)
+                        .background(
+                            if (SpeaxManager.isConnected) MaterialTheme.colorScheme.primary 
+                            else ComposeColor.White.copy(alpha = 0.08f), 
+                            CircleShape
+                        )
+                        .border(
+                            if (SpeaxManager.isConnected) 0.dp else 1.dp, 
+                            ComposeColor.White.copy(alpha = 0.15f), 
+                            CircleShape
+                        )
+                        .graphicsLayer {
+                            val scale = 1f + (aiAnimatedIntensity.floatValue * 0.15f)
+                            scaleX = scale
+                            scaleY = scale
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    AlyxLogo(
+                        modifier = Modifier.size(80.dp),
+                        tint = if (SpeaxManager.isConnected) ComposeColor.White else ComposeColor.White.copy(alpha = 0.5f)
                     )
                 }
 
-                Spacer(modifier = Modifier.height(64.dp))
-
-                // User Mic Disc Pulse at the bottom
-                Box(contentAlignment = Alignment.Center) {
+                // Mic Button (Overlapping Bottom Right of Main Disc)
+                Box(
+                    modifier = Modifier.offset(x = 65.dp, y = 65.dp - shiftAmount),
+                    contentAlignment = Alignment.Center
+                ) {
                     MicPulsingGlow(intensityProvider = { micAnimatedIntensity.floatValue })
                     
                     Box(
                         modifier = Modifier
-                            .size(64.dp)
+                            .size(72.dp)
                             .background(
                                 if (SpeaxManager.isMicMuted) ComposeColor.DarkGray else ComposeColor.White.copy(alpha = 0.25f),
                                 CircleShape
                             )
+                            .border(6.dp, ComposeColor.Black.copy(alpha = 0.5f), CircleShape)
                             .border(1.dp, ComposeColor.White.copy(alpha = 0.3f), CircleShape)
                             .graphicsLayer {
                                 val scale = 1f + (micAnimatedIntensity.floatValue * 0.15f)
@@ -237,14 +219,56 @@ class AlyxVoiceInteractionSession(context: Context) : VoiceInteractionSession(co
                             },
                         contentAlignment = Alignment.Center
                     ) {
-                        // We can add the icon here for better clarity as a "mic disc"
-                        androidx.compose.material3.Icon(
-                            imageVector = if (SpeaxManager.isMicMuted) androidx.compose.material.icons.Icons.Filled.MicOff else androidx.compose.material.icons.Icons.Filled.Mic,
+                        Icon(
+                            imageVector = if (SpeaxManager.isMicMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
                             contentDescription = "Mic",
                             tint = ComposeColor.White.copy(alpha = 0.8f),
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(28.dp)
                         )
                     }
+                }
+
+                // Status & Thinking Text (Centered below main)
+                Column(
+                    modifier = Modifier.offset(y = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = statusText,
+                        color = ComposeColor.White,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Light,
+                        modifier = Modifier.padding(horizontal = 32.dp)
+                    )
+                    
+                    if (SpeaxManager.isGeneratingAi) {
+                        Text(
+                            text = "${SpeaxManager.assistantName} is thinking...",
+                            color = ComposeColor.Cyan.copy(alpha = 0.6f),
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+
+                // Close Button (Centered much lower)
+                FloatingActionButton(
+                    onClick = { 
+                        SpeaxManager.audioEngine.abortPlayback()
+                        finish()
+                    },
+                    shape = CircleShape,
+                    modifier = Modifier.size(72.dp).offset(y = shiftAmount),
+                    containerColor = ComposeColor.White.copy(alpha = 0.15f),
+                    elevation = FloatingActionButtonDefaults.elevation(0.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Close Assistant",
+                        modifier = Modifier.size(32.dp),
+                        tint = ComposeColor.White.copy(alpha = 0.7f)
+                    )
                 }
             }
         }

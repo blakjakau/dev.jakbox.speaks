@@ -28,7 +28,9 @@ let speechStartTime = 0; // Recorded when VAD trips
 let lastSummaryData = { estTokens: 0, maxTokens: 8192, archiveTurns: 0, maxArchiveTurns: 250, text: "No summary generated yet." };
 let lastTokenUsage = {};
 let currentThreadsTab = 'general';
+let currentSortMode = 'timestamp';
 let lastThreadsData = { activeId: 'default', threads: [] };
+
 
 
 // Web STT Engine States
@@ -116,6 +118,7 @@ const clearHistoryBtn = document.getElementById('clearHistoryBtn');
 const rebuildSummaryBtn = document.getElementById('rebuildSummaryBtn');
 const muteBtn = document.getElementById('muteBtn');
 const pauseBtn = document.getElementById('pauseBtn');
+const connectText = document.getElementById('connectText');
 
 const progressContainer = document.getElementById('audioProgressContainer');
 const progressBar = document.getElementById('audioProgressBar');
@@ -143,6 +146,8 @@ const drawerOverlay = document.getElementById('drawerOverlay');
 
 const btnTabGeneral = document.getElementById('btnTabGeneral');
 const btnTabAssistant = document.getElementById('btnTabAssistant');
+const btnSortActivity = document.getElementById('btnSortActivity');
+const btnSortAlpha = document.getElementById('btnSortAlpha');
 
 function updateThreadTabsUI() {
     if (currentThreadsTab === 'general') {
@@ -159,21 +164,60 @@ function updateThreadTabsUI() {
     renderThreads();
 }
 
+function updateSortUI() {
+    if (currentSortMode === 'timestamp') {
+        btnSortActivity.style.color = 'var(--teal-electric)';
+        btnSortActivity.style.fontWeight = 'bold';
+        btnSortAlpha.style.color = 'var(--text-soft)';
+        btnSortAlpha.style.fontWeight = 'normal';
+    } else {
+        btnSortAlpha.style.color = 'var(--teal-electric)';
+        btnSortAlpha.style.fontWeight = 'bold';
+        btnSortActivity.style.color = 'var(--text-soft)';
+        btnSortActivity.style.fontWeight = 'normal';
+    }
+}
+
 if (btnTabGeneral) btnTabGeneral.onclick = () => { currentThreadsTab = 'general'; updateThreadTabsUI(); };
 if (btnTabAssistant) btnTabAssistant.onclick = () => { currentThreadsTab = 'assistant'; updateThreadTabsUI(); };
+if (btnSortActivity) btnSortActivity.onclick = () => { currentSortMode = 'timestamp'; updateSortUI(); renderThreads(); };
+if (btnSortAlpha) btnSortAlpha.onclick = () => { currentSortMode = 'alphabetical'; updateSortUI(); renderThreads(); };
+
+function formatTimeShort(dateString) {
+    if (!dateString) return '';
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffSecs = Math.max(0, Math.floor(diffMs / 1000));
+    const diffMins = Math.floor(diffSecs / 60);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+    const diffWeeks = Math.floor(diffDays / 7);
+
+    if (diffWeeks > 0) return `${diffWeeks}w`;
+    if (diffDays > 0) return `${diffDays}d`;
+    if (diffHours > 0) return `${diffHours}h`;
+    if (diffMins > 0) return `${diffMins}m`;
+    return 'now';
+}
 
 function renderThreads() {
     if (!lastThreadsData) return;
     const { activeId, threads } = lastThreadsData;
 
-    // Sort all threads by createdAt descending
+    // Sort based on currentSortMode
     const sortedThreads = [...threads].sort((a, b) => {
-        const dateA = a.createdAt || '';
-        const dateB = b.createdAt || '';
-        return dateB.localeCompare(dateA);
+        if (currentSortMode === 'alphabetical') {
+            return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+        } else {
+            const dateA = a.updatedAt || a.createdAt || '';
+            const dateB = b.updatedAt || b.createdAt || '';
+            return dateB.localeCompare(dateA);
+        }
     });
 
     threadList.innerHTML = '';
+
     sortedThreads.forEach(t => {
         const isAssistant = t.id.startsWith('assistant/');
         if (currentThreadsTab === 'assistant' && !isAssistant) return;
@@ -190,6 +234,10 @@ function renderThreads() {
             closeDrawers();
         };
 
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'thread-time';
+        timeSpan.innerText = formatTimeShort(t.updatedAt || t.createdAt);
+
         const delBtn = document.createElement('button');
         delBtn.className = 'btn-del-circle';
         delBtn.innerText = 'X';
@@ -199,6 +247,7 @@ function renderThreads() {
         };
 
         btn.appendChild(nameSpan);
+        btn.appendChild(timeSpan);
         btn.appendChild(delBtn);
         threadList.appendChild(btn);
     });
@@ -329,8 +378,8 @@ async function loadVoices() {
         if (voices && voices.length > 0) {
             voices.forEach(v => {
                 const opt = document.createElement('option');
-                opt.value = v;
-                opt.innerText = v.replace('.onnx', '');
+                opt.value = v.id;
+                opt.innerText = v.name;
                 aiVoice.appendChild(opt);
             });
             const savedVoice = localStorage.getItem('speax_voice');
@@ -681,6 +730,7 @@ mainToggleBtn.onclick = async () => {
         reconnectDelay = 1000;
         mainToggleBtn.innerHTML = ICON_WAIT;
         mainToggleBtn.className = 'main-toggle-btn processing';
+        if (connectText) connectText.style.display = 'none';
         connectWebSocket();
     }
 };
@@ -770,6 +820,7 @@ serverClient = new ServerClient(
             status.innerText = isMuted ? "Status: Connected - Muted" : "Status: Connected - Listening...";
             mainToggleBtn.innerHTML = ICON_ALYX;
             mainToggleBtn.className = 'main-toggle-btn listening';
+            if (connectText) connectText.style.display = 'none';
             muteBtn.style.display = 'flex';
             muteBtn.innerHTML = isMuted ? ICON_MIC_MUTE : ICON_MIC;
             muteBtn.classList.toggle('pressed', isMuted);
@@ -1037,6 +1088,9 @@ function connectWebSocket() {
 muteBtn.onclick = () => {
     isMuted = !isMuted;
     if (isMuted) {
+        if (serverClient && serverClient.isOpen() && (isStreaming || isSpeaking)) {
+            serverClient.send("[CANCEL]");
+        }
         muteBtn.innerHTML = ICON_MIC_MUTE;
         muteBtn.classList.add('pressed');
         muteBtn.style.transform = 'scale(1)';
@@ -1089,6 +1143,7 @@ if (rebuildSummaryBtn) {
 
 function stopEverything() {
     isDictationActive = false; // Prevent auto-reconnect
+    if (connectText) connectText.style.display = 'block';
     serverClient.disconnect();
     localTtsQueue = [];
     mainToggleBtn.innerHTML = ICON_POWER;

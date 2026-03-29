@@ -76,7 +76,7 @@
 		}
 	},
 	"glados_hard": {
-		"name": "GLaDOS",
+		"name": "GLaDOS (Hard mode)",
 		"name_mutations": "glados gladys",
 		"phonetic_pronunciation": "Glad-oss",
 		"tone": "sardonic, clinically detached, passive-aggressive, highly intelligent",

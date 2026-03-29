@@ -497,6 +497,7 @@ type Persona struct {
 	Focus                 string       `json:"focus"`
 	InteractionStyle      string       `json:"interaction_style"`
 	Constraints           string       `json:"constraints"`
+	VoiceFile             string       `json:"voice_file"`
 	Theme                 PersonaTheme `json:"theme"`
 }
 
@@ -602,7 +603,9 @@ type Thread struct {
 	Summary     string        `json:"summary"`
 	ToolHistory []ChatMessage `json:"-"` // Stored separately in system_[name].json
 	CreatedAt   time.Time     `json:"createdAt"`
+	UpdatedAt   time.Time     `json:"updatedAt"`
 }
+
 
 
 type ToolAction struct {
@@ -705,10 +708,12 @@ func (s *ClientSession) appendMessage(role, content string, thread *Thread) {
 	if role == "system" {
 		if strings.HasPrefix(content, "[TOOL_RESULT") {
 			thread.ToolHistory = append(thread.ToolHistory, msg)
+			thread.UpdatedAt = msg.Timestamp
 			if len(thread.ToolHistory) > 50 {
 				thread.ToolHistory = thread.ToolHistory[len(thread.ToolHistory)-50:]
 			}
 			return
+
 		}
 		s.SystemLog = append(s.SystemLog, msg)
 		if len(s.SystemLog) > 100 {
@@ -718,7 +723,9 @@ func (s *ClientSession) appendMessage(role, content string, thread *Thread) {
 	}
 
 	thread.History = append(thread.History, msg)
+	thread.UpdatedAt = msg.Timestamp
 }
+
 
 func (s *ClientSession) appendNativeToolCall(nativeName string, args map[string]interface{}, thread *Thread) string {
 	id := generateID()
@@ -886,6 +893,37 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 	return finalized
 }
 
+func normalisePersonaName(session *ClientSession, content string) string {
+	session.Mutex.Lock()
+	v := session.Voice
+	session.Mutex.Unlock()
+
+	vName := strings.ToLower(extractVoiceName(v))
+	personasMutex.RLock()
+	persona, personaOk := personas[vName]
+	personasMutex.RUnlock()
+
+	if personaOk && persona.NameMutations != "" {
+		mutations := strings.Fields(persona.NameMutations)
+		oldContent := content
+		for _, m := range mutations {
+			if m == "" {
+				continue
+			}
+			re := regexp.MustCompile("(?i)\\b" + regexp.QuoteMeta(m) + "\\b")
+			if re.MatchString(content) {
+				newContent := re.ReplaceAllString(content, persona.Name)
+				log.Printf("[STT] Match found! Mutation '%s' replaced. '%s' -> '%s'", m, content, newContent)
+				content = newContent
+			}
+		}
+		if content != oldContent {
+			log.Printf("[STT] Prompt normalised: '%s' -> '%s'", oldContent, content)
+		}
+	}
+	return content
+}
+
 func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Time) bool {
 	if !session.PassiveAssistant {
 		return true // Always attentive
@@ -900,6 +938,31 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	wakeWords := config.WakeWords
 	passiveWindowSeconds := config.PassiveWindowSeconds
 	configMutex.RUnlock()
+
+	// Check persona-specific wake words (Name and Mutations)
+	session.Mutex.Lock()
+	v := session.Voice
+	session.Mutex.Unlock()
+	vName := strings.ToLower(extractVoiceName(v))
+	personasMutex.RLock()
+	p, hasP := personas[vName]
+	personasMutex.RUnlock()
+
+	if hasP {
+		pWords := []string{strings.ToLower(p.Name)}
+		if p.NameMutations != "" {
+			pWords = append(pWords, strings.Fields(strings.ToLower(p.NameMutations))...)
+		}
+		for _, word := range pWords {
+			if word != "" && strings.Contains(lowerPrompt, word) {
+				session.Mutex.Lock()
+				session.LastActiveTime = time.Now()
+				session.Mutex.Unlock()
+				log.Printf("[RUMBLE] Persona wake word detected at %v: '%s' (Persona: %s)", baseTime.Format("15:04:05.000"), word, p.Name)
+				return true
+			}
+		}
+	}
 
 	for _, word := range wakeWords {
 		if strings.Contains(lowerPrompt, word) {
@@ -1282,7 +1345,9 @@ func loadSession(clientID string) *ClientSession {
 			History: session.History, Archive: session.Archive, Summary: session.Summary,
 			ToolHistory: []ChatMessage{},
 			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
 		}
+
 
 		session.Threads["default"] = t
 		session.ActiveThreadID = "default"
@@ -1574,6 +1639,15 @@ func (s *ClientSession) isFallbackModel(model string) bool {
 	return false
 }
 
+func getMidnightPTBound(now time.Time) time.Time {
+	// 7am UTC is midnight PT (PDT) as specifically requested
+	boundary := time.Date(now.Year(), now.Month(), now.Day(), 7, 0, 0, 0, time.UTC)
+	if now.Before(boundary) {
+		boundary = boundary.AddDate(0, 0, -1)
+	}
+	return boundary
+}
+
 func (s *ClientSession) checkRateLimitUnsafe(model string) (string, error) {
 	configMutex.RLock()
 	limits, ok := config.ModelLimits[model]
@@ -1603,7 +1677,7 @@ func (s *ClientSession) checkRateLimitUnsafe(model string) (string, error) {
 
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
-	oneDayAgo := now.Add(-24 * time.Hour)
+	midnightPT := getMidnightPTBound(now)
 
 	var warning string
 
@@ -1611,7 +1685,7 @@ func (s *ClientSession) checkRateLimitUnsafe(model string) (string, error) {
 	if limits.RPD > 0 {
 		count := 0
 		for _, t := range usage.RequestTimes {
-			if t.After(oneDayAgo) {
+			if t.After(midnightPT) {
 				count++
 			}
 		}
@@ -1693,6 +1767,7 @@ func (s *ClientSession) checkRateLimit(model string) (string, error) {
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
 	oneDayAgo := now.Add(-24 * time.Hour)
+	midnightPT := getMidnightPTBound(now)
 
 	// Prune old request times
 	var validRequests []time.Time
@@ -1716,12 +1791,17 @@ func (s *ClientSession) checkRateLimit(model string) (string, error) {
 
 	// Check RPD
 	if limits.RPD > 0 {
-		count := len(usage.RequestTimes)
-		if count >= limits.RPD {
-			return "", fmt.Errorf("Daily request limit reached for model %s (%d/%d)", model, count, limits.RPD)
+		rpdCount := 0
+		for _, t := range usage.RequestTimes {
+			if t.After(midnightPT) {
+				rpdCount++
+			}
 		}
-		if float64(count)/float64(limits.RPD) >= 0.9 {
-			warning = fmt.Sprintf("You are approaching the daily request limit for %s (%d/%d)", model, count, limits.RPD)
+		if rpdCount >= limits.RPD {
+			return "", fmt.Errorf("Daily request limit reached for model %s (%d/%d)", model, rpdCount, limits.RPD)
+		}
+		if float64(rpdCount)/float64(limits.RPD) >= 0.9 {
+			warning = fmt.Sprintf("You are approaching the daily request limit for %s (%d/%d)", model, rpdCount, limits.RPD)
 		}
 	}
 
@@ -1794,8 +1874,13 @@ func (s *ClientSession) getRateLimitUsageUnsafe(model string) (rpm, rpd int, tpm
 		}
 	}
 
-	// RPD (requests in last 24h)
-	rpd = len(usage.RequestTimes)
+	// RPD (requests since midnight PT)
+	midnightPT := getMidnightPTBound(now)
+	for _, t := range usage.RequestTimes {
+		if t.After(midnightPT) {
+			rpd++
+		}
+	}
 
 	return rpm, rpd, tpm, limits, true
 }
@@ -1808,7 +1893,7 @@ func (s *ClientSession) getRateLimitStatus(model string) string {
 		return ""
 	}
 
-	return fmt.Sprintf("\n\n### Model Usage & Limits (%s)\n- Requests Per Minute: %d/%d\n- Tokens Per Minute: %d/%d used in last 60s\n- Requests Per Day: %d/%d recorded in last 24h",
+	return fmt.Sprintf("\n\n### Model Usage & Limits (%s)\n- Requests Per Minute: %d/%d\n- Tokens Per Minute: %d/%d used in last 60s\n- Requests Per Day: %d/%d since midnight PT",
 		model, rpm, limits.RPM, tpm, limits.TPM, rpd, limits.RPD)
 }
 
@@ -1895,12 +1980,14 @@ func sendSettings(ws *websocket.Conn, session *ClientSession) {
 func sendThreads(ws *websocket.Conn, session *ClientSession) {
 	session.Mutex.Lock()
 	type threadInfo struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID        string    `json:"id"`
+		Name      string    `json:"name"`
+		CreatedAt time.Time `json:"createdAt"`
+		UpdatedAt time.Time `json:"updatedAt"`
 	}
 	list := make([]threadInfo, 0) // Explicitly initialize so it marshals to [] instead of null
 	for _, t := range session.Threads {
-		list = append(list, threadInfo{ID: t.ID, Name: t.Name})
+		list = append(list, threadInfo{ID: t.ID, Name: t.Name, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt})
 	}
 	payload := map[string]interface{}{"activeId": session.ActiveThreadID, "threads": list}
 	data, err := json.Marshal(payload)
@@ -2013,6 +2100,15 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		// Handle incoming text (TTS Request)
 		if messageType == websocket.TextMessage {
 			text := string(p)
+
+			if text == "[CANCEL]" {
+				session.BufferMutex.Lock()
+				session.StreamingBuffer = nil
+				session.ActiveSeqID = 0
+				session.BufferMutex.Unlock()
+				log.Printf("[CANCEL] Session %s cancelled recording.", session.ClientID)
+				continue
+			}
 
 			if text == "[REQUEST_SYNC]" {
 				sendThreads(ws, session)
@@ -2384,6 +2480,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					}
 
 					isAssistant := strings.Contains(tagContent, "ASSISTANT")
+
+					content = normalisePersonaName(session, content)
 					shouldProcess := isTyped || shouldProcessPrompt(session, content, baseTime)
 
 					if shouldProcess {
@@ -2646,6 +2744,7 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio [
 		return
 	}
 	text = filteredText
+	text = normalisePersonaName(session, text)
 	if handleSystemTranscription(session, text, ws) {
 		return
 	}
@@ -3493,6 +3592,7 @@ func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, ses
 				ID:        newID,
 				Name:      topic,
 				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
 			}
 			session.ActiveThreadID = newID
 			shouldSync = true
@@ -4633,9 +4733,18 @@ func injectSystemAudio(text string, ws *websocket.Conn, session *ClientSession) 
 	}
 }
 
-func queryTTS(text string, voiceFile string, userName string, personaName string, phoneticName string) ([]byte, error) {
+func queryTTS(text string, voice string, userName string, personaName string, phoneticName string) ([]byte, error) {
+	// Resolve voice (persona ID or filename) to the actual voice file
+	voiceFile := voice
+	personaNameLower := strings.ToLower(extractVoiceName(voice))
+	personasMutex.RLock()
+	if p, ok := personas[personaNameLower]; ok && p.VoiceFile != "" {
+		voiceFile = p.VoiceFile
+	}
+	personasMutex.RUnlock()
+
 	text = tts.Sanitise(text, userName, personaName, phoneticName)
-	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s", text, voiceFile)
+	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s (resolved from %s)", text, voiceFile, voice)
 	modelPath := filepath.Join(".", "piper", "models", voiceFile)
 	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
 	configMutex.RLock()
@@ -4838,15 +4947,36 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleVoices(w http.ResponseWriter, r *http.Request) {
-	files, err := os.ReadDir("./piper/models")
-	var out []string
-	if err == nil {
-		for _, f := range files {
-			if strings.HasSuffix(f.Name(), ".onnx") {
-				out = append(out, f.Name())
-			}
+	type PersonaInfo struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		VoiceFile string `json:"voice_file"`
+	}
+
+	personasMutex.RLock()
+	defer personasMutex.RUnlock()
+
+	var out []PersonaInfo
+	for id, p := range personas {
+		if p.VoiceFile == "" {
+			continue
+		}
+		// Check if the voice file actually exists
+		modelPath := filepath.Join(".", "piper", "models", p.VoiceFile)
+		if _, err := os.Stat(modelPath); err == nil {
+			out = append(out, PersonaInfo{
+				ID:        id,
+				Name:      p.Name,
+				VoiceFile: p.VoiceFile,
+			})
 		}
 	}
+
+	// Sort by name for UI consistency
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 }

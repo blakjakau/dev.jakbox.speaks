@@ -182,8 +182,24 @@ input::placeholder, textarea::placeholder { color: var(--slate-high); }
 .thread-item {
     display: flex; justify-content: space-between; align-items: center; padding: 10px;
     border-radius: 4px; cursor: pointer; background: transparent; color: var(--text-soft);
+    gap: 8px;
 }
 .thread-item.active { background: var(--slate-mid); color: var(--text-bright); }
+.thread-item span:first-of-type {
+    flex-grow: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0; /* Important for ellipsis in flexbox */
+}
+.thread-time {
+    font-size: 0.8em;
+    color: var(--text-soft);
+    opacity: 0.6;
+    flex-shrink: 0;
+    margin-left: auto;
+    text-align: right;
+}
 .btn-del-circle {
     width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; padding: 0;
     background: var(--slate-high); color: var(--text-soft); border: none; cursor: pointer; margin-left: 10px; flex-shrink: 0;

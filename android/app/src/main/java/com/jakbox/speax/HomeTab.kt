@@ -23,6 +23,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalConfiguration
 
 @Composable
@@ -79,6 +81,16 @@ fun HomeTab(mainActivity: MainActivity) {
                 AlyxLogo(
                     modifier = Modifier.size(64.dp),
                     tint = if (mainActivity.isConnected) Color.White else MaterialTheme.colorScheme.primary
+                )
+            }
+
+            if (!mainActivity.isConnected) {
+                Text(
+                    text = "Tap to Connect",
+                    color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.7f),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Light,
+                    modifier = Modifier.offset(y = -shiftAmount + 110.dp)
                 )
             }
 

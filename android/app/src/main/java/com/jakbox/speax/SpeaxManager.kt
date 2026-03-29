@@ -16,7 +16,9 @@ import org.json.JSONObject
 import com.k2fsa.sherpa.onnx.*
 
 data class UiMessage(val role: String, val content: String)
-data class ThreadItem(val id: String, val name: String, val createdAt: String = "")
+data class ThreadItem(val id: String, val name: String, val createdAt: String = "", val updatedAt: String = "")
+data class PersonaVoice(val id: String, val name: String, val voiceFile: String)
+
 
 data class SpeaxThemeData(
     val primary: String,
@@ -83,12 +85,12 @@ object SpeaxManager {
 
     var availableModels = mutableStateListOf<String>()
     var isLoadingModels by mutableStateOf(false)
-    var availableVoices = mutableStateListOf<String>()
+    var availableVoices = mutableStateListOf<PersonaVoice>()
     var isLoadingVoices by mutableStateOf(false)
     var micProfile by mutableStateOf("standard")
     
     val assistantName by derivedStateOf {
-        if (aiVoice.isBlank()) "Alyx" else cleanVoiceName(aiVoice).replaceFirstChar { it.uppercase() }
+        availableVoices.find { it.id == aiVoice }?.name ?: "Alyx"
     }
     
     // Memory & Thread State
@@ -101,6 +103,10 @@ object SpeaxManager {
     var maxTokens by mutableStateOf(8192)
     val tokenUsage = mutableStateMapOf<String, Long>()
     val availableThreads = mutableStateListOf<ThreadItem>()
+    var threadSortMode by mutableStateOf("timestamp") // "timestamp" or "alphabetical"
+    var selectedThreadTab by mutableStateOf(0) // 0: General, 1: Assistant
+
+
     
     var isGeneratingAi by mutableStateOf(false)
 
@@ -139,36 +145,38 @@ object SpeaxManager {
         isLoadingVoices = true
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val voices = mutableListOf<String>()
-                if (useLocalTts) {
-                    // List local models from filesDir/piper_env/models
-                    val modelsDir = File(piperDir, "models")
-                    if (modelsDir.exists() && modelsDir.isDirectory) {
-                        modelsDir.listFiles { f: File -> f.name.endsWith(".onnx") }?.forEach {
-                            voices.add(it.name.replace(".onnx", ""))
-                        }
-                    }
-                    // Also check piperDir root for legacy / nested voices if not found in models/
-                    if (voices.isEmpty()) {
-                        piperDir.walkTopDown().filter { it.isFile && it.name.endsWith(".onnx") }.forEach {
-                            voices.add(it.name.replace(".onnx", ""))
-                        }
-                    }
-                } else {
-                    val url = "https://speax.jakbox.dev/api/voices"
-                    val request = okhttp3.Request.Builder().url(url).build()
-                    val response = httpClient.newCall(request).execute()
-                    if (response.isSuccessful) {
-                        val jsonStr = response.body?.string() ?: "[]"
-                        val jsonArray = org.json.JSONArray(jsonStr)
-                        for (i in 0 until jsonArray.length()) {
-                            voices.add(jsonArray.getString(i).replace(".onnx", ""))
-                        }
+                val personasList = mutableListOf<PersonaVoice>()
+                val url = "https://speax.jakbox.dev/api/voices"
+                val request = okhttp3.Request.Builder().url(url).build()
+                val response = httpClient.newCall(request).execute()
+                
+                if (response.isSuccessful) {
+                    val jsonStr = response.body?.string() ?: "[]"
+                    val jsonArray = org.json.JSONArray(jsonStr)
+                    for (i in 0 until jsonArray.length()) {
+                        val obj = jsonArray.getJSONObject(i)
+                        personasList.add(PersonaVoice(
+                            id = obj.getString("id"),
+                            name = obj.getString("name"),
+                            voiceFile = obj.getString("voice_file")
+                        ))
                     }
                 }
+
+                val finalVoices = if (useLocalTts) {
+                    // Filter by what we have locally
+                    val modelsDir = File(piperDir, "models")
+                    personasList.filter { p ->
+                        File(modelsDir, p.voiceFile).exists() || 
+                        piperDir.walkTopDown().any { it.isFile && it.name == p.voiceFile }
+                    }
+                } else {
+                    personasList
+                }
+
                 launch(Dispatchers.Main) {
                     availableVoices.clear()
-                    availableVoices.addAll(voices.distinct())
+                    availableVoices.addAll(finalVoices)
                 }
             } catch (e: Exception) { Log.e("SpeaxManager", "Error fetching voices", e) }
             finally { launch(Dispatchers.Main) { isLoadingVoices = false } }
@@ -457,6 +465,9 @@ object SpeaxManager {
     }
     
     fun toggleMicMute() {
+        if (!isMicMuted && audioEngine.isRecording) {
+            speaxWebSocket?.sendText("[CANCEL]")
+        }
         isMicMuted = !isMicMuted
         audioEngine.isMicMuted = isMicMuted
         Log.d("SpeaxManager", "toggleMicMute: isMicMuted=$isMicMuted")
@@ -563,7 +574,10 @@ object SpeaxManager {
                     if (useLocalTts && chunk.isNotBlank()) {
                         CoroutineScope(Dispatchers.IO).launch {
                             piperMutex.withLock {
-                                val audioBytes = piperEngine.synthesize(chunk, aiVoice)
+                                // Resolve voice ID to voice file if possible
+                                val persona = availableVoices.find { it.id == aiVoice }
+                                val voiceToUse = persona?.voiceFile ?: aiVoice
+                                val audioBytes = piperEngine.synthesize(chunk, voiceToUse)
                                 if (audioBytes != null && audioBytes.isNotEmpty()) {
                                     audioEngine.playAudioChunk(audioBytes)
                                 }
@@ -607,14 +621,16 @@ object SpeaxManager {
                             val id = t.optString("id")
                             val name = t.optString("name", "General Chat")
                             val createdAt = t.optString("createdAt", "")
-                            parsedThreads.add(ThreadItem(id, name, createdAt))
+                            val updatedAt = t.optString("updatedAt", "")
+                            parsedThreads.add(ThreadItem(id, name, createdAt, updatedAt))
                             if (id == parsedActiveId) {
                                 parsedActiveName = name
                             }
                         }
                     }
-                    // Sort assistant threads newest to oldest
-                    parsedThreads.sortByDescending { it.createdAt }
+                    // Sort assistant threads newest to oldest by default (or current mode)
+                    sortThreadsInternal(parsedThreads)
+
 
                     CoroutineScope(Dispatchers.Main).launch {
                         activeThreadId = parsedActiveId
@@ -743,6 +759,25 @@ object SpeaxManager {
     fun rebuildSummary() {
         speaxWebSocket?.sendText("[REBUILD_SUMMARY]")
     }
+
+    fun sortThreadsInternal(list: MutableList<ThreadItem>) {
+        if (threadSortMode == "alphabetical") {
+            list.sortBy { it.name.lowercase() }
+        } else {
+            // Sort by updatedAt descending (fallback to createdAt if missing)
+            list.sortWith(compareByDescending<ThreadItem> { 
+                if (it.updatedAt.isNotBlank()) it.updatedAt else it.createdAt 
+            }.thenByDescending { it.id })
+        }
+    }
+
+    fun resortThreads() {
+        val current = availableThreads.toMutableList()
+        sortThreadsInternal(current)
+        availableThreads.clear()
+        availableThreads.addAll(current)
+    }
+
 
     fun cleanVoiceName(name: String): String {
         return name.replace(".onnx", "")
