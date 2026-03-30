@@ -3412,12 +3412,12 @@ func prepareSystemPrompt(session *ClientSession, model, voiceName, provider stri
 	configMutex.RUnlock()
 
 	// 1. Get persona
-	personaName := strings.ToLower(voiceName)
+	personaName := strings.ToLower(extractVoiceName(voiceName))
 	personasMutex.RLock()
 	p, hasPersona := personas[personaName]
 	personasMutex.RUnlock()
 
-	effectiveAssistantName := strings.Title(voiceName)
+	effectiveAssistantName := strings.Title(extractVoiceName(voiceName))
 	if hasPersona && p.Name != "" {
 		effectiveAssistantName = p.Name
 	}
@@ -3981,6 +3981,8 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
 				}
 			} else {
+				log.Printf("[Gemini TTS Worker] Processing chunk (len: %d) with voice: '%s', user: '%s', persona: '%s', phonetic: '%s'", 
+					len(text), voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				audioBytes, err := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				if err != nil {
 					log.Println("Gemini TTS Worker Error:", err)
@@ -4332,6 +4334,8 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
 				}
 			} else {
+				log.Printf("[Ollama TTS Worker] Processing chunk (len: %d) with voice: '%s', user: '%s', persona: '%s', phonetic: '%s'", 
+					len(text), voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				audioBytes, err := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				if err != nil {
 					log.Println("Ollama TTS Worker Error:", err)
@@ -4776,8 +4780,39 @@ func queryTTS(text string, voice string, userName string, personaName string, ph
 	personasMutex.RUnlock()
 
 	text = tts.Sanitise(text, userName, personaName, phoneticName)
-	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s (resolved from %s)", text, voiceFile, voice)
 	modelPath := filepath.Join(".", "piper", "models", voiceFile)
+
+	// Verify model existence and fall back if missing
+	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+		log.Printf("[TTS] Voice file '%s' not found at %s. Attempting fallback.", voiceFile, modelPath)
+		configMutex.RLock()
+		fallbackVoice := config.DefaultVoice
+		configMutex.RUnlock()
+
+		// Try the configured default
+		modelPath = filepath.Join(".", "piper", "models", fallbackVoice)
+		if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+			log.Printf("[TTS] Default voice '%s' also not found. Scanning for any available model.", fallbackVoice)
+			// Last effort: pick the first .onnx file in the models directory
+			files, _ := os.ReadDir(filepath.Join(".", "piper", "models"))
+			found := false
+			for _, f := range files {
+				if !f.IsDir() && strings.HasSuffix(f.Name(), ".onnx") {
+					voiceFile = f.Name()
+					modelPath = filepath.Join(".", "piper", "models", voiceFile)
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("no Piper voice models found on disk")
+			}
+		} else {
+			voiceFile = fallbackVoice
+		}
+	}
+
+	log.Printf("[TTS] Generating audio for text: '%s' with voice: %s (resolved from %s)", text, voiceFile, voice)
 	// Execute piper binary: -f - tells it to output the WAV file directly to standard output
 	configMutex.RLock()
 	piperBin := config.PiperBin

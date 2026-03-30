@@ -258,3 +258,31 @@ input::placeholder, textarea::placeholder { color: var(--slate-high); }
 @media (max-width: 600px) {
     .btn-primary, .btn-danger { width: 100%; margin-right: 0; }
 }
+
+/* Toast Notifications */
+.toast {
+    background: rgba(11, 30, 54, 0.9);
+    backdrop-filter: blur(10px);
+    color: var(--text-bright);
+    padding: 12px 24px;
+    border-radius: 24px;
+    border: 1px solid var(--teal-electric);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4), 0 0 10px rgba(0, 209, 193, 0.2);
+    font-weight: bold;
+    font-size: 0.9em;
+    pointer-events: auto;
+    animation: toast-in 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28), toast-out 0.3s 2.7s ease forwards;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+@keyframes toast-in {
+    from { transform: translateY(-20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes toast-out {
+    from { transform: translateY(0); opacity: 1; }
+    to { transform: translateY(-20px); opacity: 0; }
+}

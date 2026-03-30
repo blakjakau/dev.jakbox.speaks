@@ -97,9 +97,17 @@ async function getDeviceInfo() {
     if (/Android/i.test(ua)) return "Android Browser";
     if (/iPhone|iPad|iPod/i.test(ua)) return "iOS Browser";
     if (/Windows/i.test(ua)) return "Windows Browser";
-    if (/Macintosh/i.test(ua)) return "macOS Browser";
     if (/Linux/i.test(ua)) return "Linux Browser";
     return "Unknown Browser";
+}
+
+function normalizeVoiceId(id) {
+    if (!id) return '';
+    // Strip .onnx extension if present
+    let base = id.replace(/\.onnx$/, '');
+    // Strip known technical suffixes like -medium, -qint8, etc.
+    base = base.replace(/-(qint8|int8|fp16|low|medium|high|standard)$/, '');
+    return base.toLowerCase();
 }
 
 const status = document.getElementById('status');
@@ -383,8 +391,12 @@ async function loadVoices() {
                 aiVoice.appendChild(opt);
             });
             const savedVoice = localStorage.getItem('speax_voice');
-            if (savedVoice && Array.from(aiVoice.options).some(opt => opt.value === savedVoice)) {
-                aiVoice.value = savedVoice;
+            if (savedVoice) {
+                const normalizedSaved = normalizeVoiceId(savedVoice);
+                const matchingOpt = Array.from(aiVoice.options).find(opt => 
+                    opt.value === savedVoice || normalizeVoiceId(opt.value) === normalizedSaved
+                );
+                if (matchingOpt) aiVoice.value = matchingOpt.value;
             }
         } else {
             aiVoice.innerHTML = '<option value="">No voices found</option>';
@@ -525,8 +537,18 @@ async function processLocalTtsQueue() {
             const utterance = new SpeechSynthesisUtterance(text);
 
             // Optional: If you ever select a native browser voice in the dropdown, it will try to use it!
+            // Match a browser voice to the selected persona
             const voices = window.speechSynthesis.getVoices();
-            const selectedVoice = voices.find(v => v.name === aiVoice.value);
+            const normalizedTarget = normalizeVoiceId(aiVoice.value);
+            
+            // Try 1: Exact match on normalized name
+            let selectedVoice = voices.find(v => normalizeVoiceId(v.name) === normalizedTarget);
+            
+            // Try 2: Partial match (e.g. "Google US English" containing "English")
+            if (!selectedVoice && normalizedTarget) {
+                selectedVoice = voices.find(v => v.name.toLowerCase().includes(normalizedTarget));
+            }
+
             if (selectedVoice) utterance.voice = selectedVoice;
 
             utterance.onend = resolve;
@@ -543,6 +565,10 @@ async function processLocalTtsQueue() {
 }
 
 function closeDrawers() {
+    const settingsOpen = settingsSidebar.style.left === '0px' || settingsSidebar.style.left === '0';
+    if (settingsOpen) {
+        saveSettings();
+    }
     threadsSidebar.style.bottom = '-100%';
     settingsSidebar.style.left = '-320px';
     drawerOverlay.classList.remove('active');
@@ -573,7 +599,17 @@ closeSettingsBtn.onclick = closeDrawers;
 aiProvider.onchange = () => { geminiSettings.style.display = aiProvider.value === 'gemini' ? 'flex' : 'none'; loadModels(); };
 geminiApiKey.onblur = () => { if (aiProvider.value === 'gemini') loadModels(); };
 
-saveSettingsBtn.onclick = () => {
+function showToast(message) {
+    const container = document.getElementById('toolToastContainer');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.innerText = message;
+    container.appendChild(toast);
+    setTimeout(() => { toast.remove(); }, 3000);
+}
+
+function saveSettings(silent = false) {
     localStorage.setItem('speax_provider', aiProvider.value);
     localStorage.setItem('speax_gemini_key', geminiApiKey.value);
     localStorage.setItem('speax_model', aiModel.value);
@@ -591,6 +627,14 @@ saveSettingsBtn.onclick = () => {
         localStorage.setItem('speax_passive_assistant', passiveAssistant);
     }
 
+    if (serverClient && serverClient.isOpen()) {
+        serverClient.sendSettings(getSettingsObj());
+    }
+
+    if (!silent) showToast("Settings saved");
+}
+
+saveSettingsBtn.onclick = () => {
     const isClient = storageMode.value === 'client';
     const wasClient = memoryManager.isClientSide;
 
@@ -607,11 +651,12 @@ saveSettingsBtn.onclick = () => {
     }
 
     memoryManager.setClientSide(isClient);
-
-    closeDrawers();
-    if (serverClient && serverClient.isOpen()) {
-        serverClient.sendSettings(getSettingsObj());
-    }
+    saveSettings();
+    
+    // Explicitly hide instead of using closeDrawers() to avoid double-save
+    threadsSidebar.style.bottom = '-100%';
+    settingsSidebar.style.left = '-320px';
+    drawerOverlay.classList.remove('active');
 };
 
 loadModels();
@@ -905,7 +950,15 @@ serverClient = new ServerClient(
                 }
 
                 loadModels().then(() => { if (s.model) aiModel.value = s.model; });
-                loadVoices().then(() => { if (s.voice) aiVoice.value = s.voice; });
+                loadVoices().then(() => { 
+                    if (s.voice) {
+                        const normalizedSynced = normalizeVoiceId(s.voice);
+                        const matchingOpt = Array.from(aiVoice.options).find(opt => 
+                            opt.value === s.voice || normalizeVoiceId(opt.value) === normalizedSynced
+                        );
+                        if (matchingOpt) aiVoice.value = matchingOpt.value;
+                    }
+                });
             }
         },
         onThreadsSync: (data) => {

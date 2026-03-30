@@ -80,6 +80,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import androidx.compose.ui.focus.onFocusChanged
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -707,6 +708,13 @@ fun ChatScreen() {
         }
     }
 
+    // Sync settings when drawer closes
+    LaunchedEffect(drawerState.isOpen) {
+        if (!drawerState.isOpen) {
+            mainActivity.pushSettingsToServer()
+        }
+    }
+
     // Fetch models once when the UI boots
     LaunchedEffect(Unit) {
         mainActivity.fetchModels()
@@ -729,17 +737,17 @@ fun ChatScreen() {
                     // --- Settings UI ---
                     OutlinedTextField(
                         value = mainActivity.userName,
-                        onValueChange = { mainActivity.userName = it; mainActivity.pushSettingsToServer() },
+                        onValueChange = { mainActivity.userName = it; mainActivity.saveSettingsLocal() },
                         label = { Text("Your Name") },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) mainActivity.pushSettingsToServer() },
                         singleLine = true
                     )
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
                         value = mainActivity.userBio,
-                        onValueChange = { mainActivity.userBio = it; mainActivity.pushSettingsToServer() },
+                        onValueChange = { mainActivity.userBio = it; mainActivity.saveSettingsLocal() },
                         label = { Text("System Bio / Role") },
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) mainActivity.pushSettingsToServer() },
                         maxLines = 3
                     )
                     Spacer(Modifier.height(24.dp))

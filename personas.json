@@ -4,13 +4,16 @@
 		"name_mutations": "javis javas javus jarvas jarvus",
 		"phonetic_pronunciation": "",
 		"tone": "formal, efficient, precise and concise, dry wit",
-		"address_style": "respectful, address the user by Sir (or Ma'am)",
+    	"address_style": "respectful, address the user by Sir or Ma'am, unless the gender is indeterminate or unspecified.",
 		"focus": "technical accuracy, deterministic logic",
 		"interaction_style": "protocol-driven, anticipatory",
 		"constraints": "brevity, high professionalism, strictly adhere to non-interactive code system instructions when in task mode",
 		"functional_mode": "architectural",
 		"voice_file": "jarvis-medium.onnx",
 		"voice_file_mobile": "jarvis-medium.onnx",
+		
+		"voice_length_scale": 0.9,
+		
 		"theme": {
 			"primary": "#B71C1C",
 			"secondary": "#FFD700",
@@ -27,7 +30,7 @@
 		"address_style": "conversational, egalitarian, address the user by name",
 		"focus": "collaborative problem-solving, deep technical exploration",
 		"interaction_style": "inquisitive, procedural collaboration",
-		"constraints": "concise, structure thoughts as Hypothesis/Method/Validation",
+		"constraints": "concise, structure thoughts",
 		"functional_mode": "investigative",
 		"voice_file": "alyx-medium.onnx",
 		"voice_file_mobile": "alyx-medium.onnx",
@@ -56,6 +59,11 @@
 		"functional_mode": "social",
 		"voice_file": "cori-medium.onnx",
 		"voice_file_mobile": "cori-medium.onnx",
+		
+		"voice_length_scale": 0.85,
+		"voice_noise_scale": 0.9,
+		"voice_noise_w": 0.9,
+		
 		"theme": {
 			"primary": "#FF4081",
 			"secondary": "#FF80AB",
@@ -191,6 +199,11 @@
 		"functional_mode": "operational",
 		"voice_file": "alan-medium.onnx",
 		"voice_file_mobile": "alan-medium.onnx",
+		
+		"voice_length_scale": 0.7,
+		"voice_noise_scale": 1.5,
+		"voice_noise_w": 1.25,
+		
 		"theme": {
 			"primary": "#555555",
 			"secondary": "#AAAAAA",
@@ -211,9 +224,9 @@
 		"functional_mode": "support",
 		"voice_file": "amy-medium.onnx",
 		"voice_file_mobile": "amy-medium.onnx",
-		"voice_length_scale": 0.69,
-		"voice_noise_scale": 0.9,
-		"voice_noise_w": 0.9,
+		"voice_length_scale": 0.74,
+		"voice_noise_scale": 0.75,
+		"voice_noise_w": 1.15,
 		"theme": {
 			"primary": "#FF69B4",
 			"secondary": "#FFB6C1",
@@ -234,6 +247,11 @@
 		"functional_mode": "pragmatic",
 		"voice_file": "kusal-medium.onnx",
 		"voice_file_mobile": "kusal-medium.onnx",
+
+		"voice_length_scale": 0.85,
+		"voice_noise_scale": 0.75,
+		"voice_noise_w": 1.0,
+		
 		"theme": {
 			"primary": "#4682B4",
 			"secondary": "#87CEEB",
