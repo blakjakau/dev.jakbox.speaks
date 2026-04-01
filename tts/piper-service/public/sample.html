@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Piper TTS Diagnostic</title>
+    <style>
+        :root {
+            --primary: #bb86fc;
+            --secondary: #03dac6;
+            --background: #121212;
+            --surface: #1e1e1e;
+            --surface-variant: #2d2d2d;
+            --on-surface: #ffffff;
+            --on-surface-medium: #b3b3b3;
+            --on-primary: #000000;
+            --outline: #444444;
+            --glass: rgba(255, 255, 255, 0.05);
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--background);
+            color: var(--on-surface);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .header {
+            padding: 1rem 2rem;
+            background: var(--surface);
+            border-bottom: 1px solid var(--outline);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .visualizer-card {
+            background: linear-gradient(135deg, #1e1e1e 0%, #121212 100%);
+            height: 120px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .highlight-card {
+            background: var(--surface-variant);
+            border-left: 4px solid var(--primary);
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            font-size: 1.1rem;
+            font-weight: 500;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .highlight-text {
+            color: var(--on-surface);
+            opacity: 0.5;
+        }
+
+        .highlight-text.active {
+            color: var(--primary);
+            opacity: 1;
+            text-shadow: 0 0 10px rgba(187, 134, 252, 0.3);
+        }
+
+        .header h1 {
+            font-size: 1.25rem;
+            color: var(--primary);
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .badge {
+            background: var(--surface-variant);
+            color: var(--primary);
+            padding: 0.2rem 0.6rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .main {
+            flex: 1;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            max-width: 900px;
+            margin: 0 auto;
+            width: 100%;
+            overflow-y: auto;
+        }
+
+        .card {
+            background: var(--surface);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid var(--outline);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .field-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--on-surface-medium);
+            text-transform: uppercase;
+        }
+
+        select, textarea {
+            background: var(--surface-variant);
+            border: 1px solid var(--outline);
+            color: var(--on-surface);
+            padding: 0.75rem;
+            border-radius: 8px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        select:focus, textarea:focus {
+            border-color: var(--primary);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 120px;
+        }
+
+        .actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        button.primary {
+            background: var(--primary);
+            color: var(--on-primary);
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.1s, opacity 0.2s;
+        }
+
+        button.primary:hover { opacity: 0.9; transform: translateY(-1px); }
+        button.primary:active { transform: translateY(0); }
+        button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .logs {
+            background: #000;
+            color: #00ff00;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem;
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--outline);
+            height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        .log-entry { margin-bottom: 0.25rem; }
+        .log-time { color: #888; margin-right: 0.5rem; }
+        .log-error { color: #ff5252; }
+
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--on-surface-medium);
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ff5252;
+            box-shadow: 0 0 5px #ff5252;
+        }
+
+        .dot.online { background: #03dac6; box-shadow: 0 0 5px #03dac6; }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .stat-card {
+            background: var(--surface-variant);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--outline);
+        }
+
+        .stat-value {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--secondary);
+            margin-bottom: 0.2rem;
+        }
+
+        .stat-label {
+            font-size: 0.7rem;
+            color: var(--on-surface-medium);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        button.secondary {
+            background: transparent;
+            color: #ff5252;
+            border: 1px solid #ff5252;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button.secondary:hover {
+            background: rgba(255, 82, 82, 0.1);
+        }
+
+        button.secondary:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><span class="badge">Piper TTS</span> Diagnostic</h1>
+        <div class="status-bar">
+            <span>Uptime: <span id="uptime">0s</span></span>
+            <div id="status-dot" class="dot"></div>
+            <span id="status-text">Disconnected</span>
+        </div>
+    </div>
+
+    <div class="main">
+        <div class="card">
+            <div class="card visualizer-card">
+                <canvas id="visualizer"></canvas>
+            </div>
+
+            <div class="card highlight-card" id="highlightArea" style="display:none;">
+                <div class="highlight-text" id="currentText">Waiting for audio...</div>
+            </div>
+
+            <div class="form-grid">
+                <div class="field-group">
+                    <label>Voice Model</label>
+                    <select id="model-select">
+                        <option value="">Loading models...</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <label>Mode</label>
+                    <select id="mode-select">
+                        <option value="http">HTTP POST (Standard)</option>
+                        <option value="ws">WebSocket (Streaming)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="field-group" style="margin-bottom: 1rem;">
+                <label>Text Input</label>
+                <textarea id="text-input" placeholder="Type something for Piper to say..."></textarea>
+            </div>
+
+            <div class="actions">
+                <div id="latency-display" style="flex-grow: 1; font-size: 0.85rem; color: var(--secondary);"></div>
+                <button class="secondary" id="stopBtn" disabled>Stop</button>
+                <button class="primary" id="synthBtn" disabled>Synthesize</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+                <input type="checkbox" id="annotatedBtn" style="width:auto;">
+                <label for="annotatedBtn" style="margin:0; cursor:pointer;">Enble Annotated Mode (Live Highlight)</label>
+            </div>
+        </div>
+
+        <div class="stats-grid" id="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value" id="stat-mem">-</div>
+                <div class="stat-label">Memory Alloc</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-cpu">-</div>
+                <div class="stat-label">GoRoutines</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-cache">-</div>
+                <div class="stat-label">Model Cache</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-active">-</div>
+                <div class="stat-label">Active Model</div>
+            </div>
+        </div>
+
+        <div class="field-group">
+            <label>Execution Logs</label>
+            <div id="log-box" class="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        const modeSelect = document.getElementById('mode-select');
+        const annotatedBtn = document.getElementById('annotatedBtn');
+        const synthBtn = document.getElementById('synthBtn');
+        const textInput = document.getElementById('text-input');
+        const logArea = document.getElementById('log-box');
+        const canvas = document.getElementById('visualizer');
+        const ctx_canvas = canvas.getContext('2d');
+        const highlightArea = document.getElementById('highlightArea');
+        const currentText = document.getElementById('currentText');
+        const logBox = document.getElementById('log-box');
+        const modelSelect = document.getElementById('model-select');
+        const latencyDisplay = document.getElementById('latency-display');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const uptimeSpan = document.getElementById('uptime');
+        const stopBtn = document.getElementById('stopBtn');
+
+        const statMem = document.getElementById('stat-mem');
+        const statCpu = document.getElementById('stat-cpu');
+        const statCache = document.getElementById('stat-cache');
+        const statActive = document.getElementById('stat-active');
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function log(msg, isError = false) {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${isError ? 'log-error' : ''}`;
+            const time = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="log-time">[${time}]</span> ${msg}`;
+            logBox.appendChild(entry);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // Initialize models
+        async function fetchModels() {
+            try {
+                const res = await fetch('/models');
+                const models = await res.json();
+                
+                const statusRes = await fetch('/status');
+                const status = await statusRes.json();
+
+                // Hydrate model from localStorage
+                const savedModel = localStorage.getItem('piper_last_model');
+
+                modelSelect.innerHTML = '';
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    if (savedModel) {
+                        if (m === savedModel) opt.selected = true;
+                    } else if (m === status.active_model) {
+                        opt.selected = true;
+                    }
+                    modelSelect.appendChild(opt);
+                });
+                log(`Fetched ${models.length} available models.`);
+
+                // Sync server model with local preference if different
+                if (savedModel && savedModel !== status.active_model) {
+                    await syncModel(savedModel);
+                }
+            } catch (e) {
+                log(`Failed to fetch models: ${e.message}`, true);
+            }
+        }
+
+        async function syncModel(model) {
+            log(`Syncing model with server: ${model}...`);
+            try {
+                const res = await fetch('/models', {
+                    method: 'POST',
+                    body: JSON.stringify({ model })
+                });
+                if (res.ok) log(`Model synced successfully.`);
+                else log(`Failed to sync model.`, true);
+            } catch (e) {
+                log(`Error syncing model: ${e.message}`, true);
+            }
+        }
+
+        // Change model
+        modelSelect.addEventListener('change', () => {
+            const model = modelSelect.value;
+            localStorage.setItem('piper_last_model', model);
+            syncModel(model);
+        });
+
+        // Update health/uptime
+        async function updateHealth() {
+            try {
+                const hRes = await fetch('/health');
+                const health = await hRes.json();
+                
+                const sRes = await fetch('/status');
+                const status = await sRes.json();
+
+                uptimeSpan.textContent = Math.floor(health.uptime_seconds) + 's';
+                statusDot.className = 'dot online';
+                statusText.textContent = 'Engine Ready';
+
+                // Update Stats
+                statMem.textContent = formatBytes(health.memory_usage_bytes);
+                statCpu.textContent = health.goroutines;
+                statCache.textContent = `${status.cached_models.length} (${formatBytes(status.total_cache_size_estimate)})`;
+                statActive.textContent = status.active_model || 'None';
+
+            } catch (e) {
+                statusDot.className = 'dot';
+                statusText.textContent = 'Disconnected';
+            }
+        }
+        setInterval(updateHealth, 5000);
+
+        // Synthesis Logic
+        let audioCtx;
+        let socket = null;
+        let audioStartTime = 0;
+        let nextPlayTime = 0;
+        let pendingText = "";
+        let analyser = null;
+        let dataArray = null;
+        let animationId = null;
+        let activeSources = [];
+        let isStopped = false;
+
+        function stopAudio() {
+            log("Stopping and muting stream...");
+            isStopped = true;
+            activeSources.forEach(s => {
+                try { s.stop(); } catch(e) {}
+            });
+            activeSources = [];
+            audioSegments = [];
+            nextPlayTime = 0;
+            stopBtn.disabled = true;
+        }
+
+        stopBtn.onclick = stopAudio;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 22050 });
+                
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.connect(audioCtx.destination);
+                
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+                
+                startHighlightLoop();
+                startVisualizer();
+            }
+            return audioCtx;
+        }
+
+        function startVisualizer() {
+            if (animationId) return;
+
+            const draw = () => {
+                animationId = requestAnimationFrame(draw);
+                analyser.getByteFrequencyData(dataArray);
+
+                const width = canvas.width;
+                const height = canvas.height;
+                ctx_canvas.clearRect(0, 0, width, height);
+
+                const barWidth = (width / dataArray.length) * 2.5;
+                let barHeight;
+                let x = 0;
+
+                for (let i = 0; i < dataArray.length; i++) {
+                    barHeight = (dataArray[i] / 255) * height;
+
+                    // Gradient color based on height
+                    const hue = 260 + (dataArray[i] / 255) * 60; // Purple to Tealish
+                    ctx_canvas.fillStyle = `hsla(${hue}, 80%, 70%, 0.8)`;
+                    
+                    // Rounded bars
+                    ctx_canvas.beginPath();
+                    ctx_canvas.roundRect(x, height - barHeight, barWidth - 2, barHeight, [4, 4, 0, 0]);
+                    ctx_canvas.fill();
+
+                    x += barWidth + 1;
+                }
+            };
+            draw();
+        }
+
+        function startHighlightLoop() {
+            const update = () => {
+                const now = audioCtx.currentTime;
+                const active = audioSegments.find(s => now >= s.start && now < s.end);
+                if (active) {
+                    currentText.innerText = active.text;
+                    currentText.classList.add('active');
+                } else {
+                    currentText.classList.remove('active');
+                }
+                requestAnimationFrame(update);
+            };
+            requestAnimationFrame(update);
+        }
+
+        function connectWS() {
+            if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(`${protocol}//${window.location.host}/stream`);
+            socket.binaryType = 'arraybuffer';
+
+            socket.onopen = () => {
+                log("WebSocket Connected");
+                statusDot.className = 'dot online';
+                statusText.textContent = 'Engine Ready';
+                synthBtn.disabled = false;
+                updateHealth(); // Immediate update on connect
+            };
+
+            socket.onmessage = async (event) => {
+                const ctx = initAudio();
+                
+                // Handle Text Messages (JSON Metadata/Errors)
+                if (typeof event.data === 'string') {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.error) {
+                            log(`Server Error: ${data.error}`, true);
+                            synthBtn.disabled = false;
+                            latencyDisplay.textContent = 'Error';
+                        } else if (data.sampleRate || data.type === 'start') {
+                            isStopped = false;
+                            window.currentSampleRate = data.sampleRate || window.currentSampleRate;
+                            log(`New stream session started: ${window.currentSampleRate} Hz`);
+                        } else if (data.type === 'text') {
+                            pendingText = data.text;
+                        } else if (data.type === 'end') {
+                            log("Stream completed (End reached)");
+                        }
+                    } catch(e) {
+                        log(`Received text: ${event.data}`);
+                    }
+                    return;
+                }
+
+                // Handle Binary Messages (PCM Audio Data)
+                if (isStopped) return;
+
+                const elapsed = Math.round(performance.now() - audioStartTime);
+                const data = event.data;
+                const pcmData = new Int16Array(data);
+                
+                latencyDisplay.textContent = `Completed in ${elapsed}ms (WS)`;
+                log(`Success: Received audio stream chunk (${pcmData.length} samples).`);
+                const floatData = new Float32Array(pcmData.length);
+                for (let i = 0; i < pcmData.length; i++) {
+                    floatData[i] = pcmData[i] / 32768.0;
+                }
+
+                const sr = window.currentSampleRate || 22050;
+                const buffer = ctx.createBuffer(1, floatData.length, sr);
+                buffer.getChannelData(0).set(floatData);
+                
+                const source = ctx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(analyser); // Connect to analyser instead of direct destination
+
+                activeSources.push(source);
+                source.onended = () => {
+                    activeSources = activeSources.filter(s => s !== source);
+                    if (activeSources.length === 0) stopBtn.disabled = true;
+                };
+                stopBtn.disabled = false;
+                
+                // Use a precise playhead to schedule chunks gaplessly
+                const now = ctx.currentTime;
+                if (nextPlayTime < now) {
+                    nextPlayTime = now;
+                }
+                
+                source.start(nextPlayTime);
+                
+                // Track timing for highlight
+                if (pendingText) {
+                    audioSegments.push({
+                        start: nextPlayTime,
+                        end: nextPlayTime + buffer.duration,
+                        text: pendingText
+                    });
+                    // Note: This logic assumes 1 text packet per binary packet for simplicity in this demo.
+                    // In a more robust system, you'd track a queue of text and durations.
+                }
+
+                nextPlayTime += buffer.duration;
+                
+                synthBtn.disabled = false;
+            };
+
+            socket.onclose = () => {
+                log("WebSocket Disconnected. Reconnecting...", true);
+                statusDot.className = 'dot';
+                statusText.textContent = 'Reconnecting...';
+                synthBtn.disabled = true;
+                setTimeout(connectWS, 3000);
+            };
+
+            socket.onerror = (e) => {
+                log(`WebSocket error`, true);
+            };
+        }
+
+        synthBtn.onclick = async () => {
+            const text = textInput.value.trim();
+            if (!text) return log("Please enter text", true);
+            const mode = modeSelect.value;
+
+            synthBtn.disabled = true;
+            latencyDisplay.textContent = 'Synthesizing...';
+            audioStartTime = performance.now();
+            isStopped = false;
+            
+            // Note: We don't reset nextPlayTime here if there's already active audio,
+            // unless the user explicitly clicks STOP. 
+            // However, for single-shot synthesis testing, resetting is usually cleaner.
+            if (activeSources.length === 0) {
+                nextPlayTime = 0;
+                audioSegments = [];
+            }
+            
+            window.currentSampleRate = 22050; // Reset default sample rate
+            pendingText = "";
+            
+            highlightArea.style.display = annotatedBtn.checked ? 'block' : 'none';
+            currentText.innerText = "Waiting for audio...";
+            
+            // Persist settings
+            localStorage.setItem('piper_last_text', text);
+            localStorage.setItem('piper_last_mode', mode);
+            localStorage.setItem('piper_last_annotated', annotatedBtn.checked);
+
+            const ctx = initAudio();
+            if (ctx.state === 'suspended') {
+                ctx.resume();
+            }
+
+            if (mode === 'http') {
+                try {
+                    const res = await fetch('/tts', {
+                        method: 'POST',
+                        body: JSON.stringify({ text })
+                    });
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const audio = new Audio(url);
+                    audio.play();
+                    stopBtn.disabled = false;
+                    audio.onended = () => { stopBtn.disabled = true; };
+                    
+                    const latency = Math.round(performance.now() - audioStartTime);
+                    latencyDisplay.textContent = `Completed in ${latency}ms (HTTP)`;
+                    log(`HTTP Success: Received ${blob.size} bytes.`);
+                } catch (e) {
+                    log(`HTTP Error: ${e.message}`, true);
+                } finally {
+                    synthBtn.disabled = false;
+                }
+            } else {
+                // WebSocket Streaming Mode
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ 
+                        text, 
+                        annotated: annotatedBtn.checked 
+                    }));
+                } else {
+                    log("WebSocket not connected", true);
+                    synthBtn.disabled = false;
+                }
+            }
+        };
+
+        // Initial Load
+        const lastText = localStorage.getItem('piper_last_text');
+        if (lastText) textInput.value = lastText;
+
+        const lastMode = localStorage.getItem('piper_last_mode');
+        if (lastMode) modeSelect.value = lastMode;
+
+        const lastAnnotated = localStorage.getItem('piper_last_annotated');
+        if (lastAnnotated !== null) annotatedBtn.checked = lastAnnotated === 'true';
+
+        connectWS();
+        fetchModels();
+        updateHealth();
+
+    </script>
+</body>
+</html>

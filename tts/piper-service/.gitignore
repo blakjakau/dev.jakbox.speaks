@@ -1,0 +1,21 @@
+# Piper Service Artifacts
+piper-service
+dist/
+bin/
+
+# Models are huge and handled separately (downloaded or local)
+models/
+*.onnx
+*.onnx.json
+
+# C++ Build remnants
+build_deps/
+*.o
+*.a
+*.so*
+!lib/*.so*
+
+# IDE/System
+.DS_Store
+.vscode/
+.idea/
