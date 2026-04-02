@@ -11,9 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"mime/multipart"
 	"net/http"
-	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -31,6 +29,7 @@ import (
 	"unicode"
 
 	"github.com/gorilla/websocket"
+	"speaks.jakbox.dev/stt"
 	"speaks.jakbox.dev/tts"
 )
 
@@ -98,7 +97,7 @@ var (
 )
 
 var (
-	whisperIndex    uint32
+	sttManager      *stt.Manager
 	piperIndex      uint32
 	ollamaIndex     uint32
 	ollamaChatIndex uint32
@@ -321,32 +320,6 @@ func recordLLMCall(provider, model string, promptTokens, responseTokens, latency
 
 // ---- End Performance Metrics --------------------------------------------
 
-type WhisperNode struct {
-	URL                string
-	Zombie             bool
-	LastResponseTime   time.Duration // Last successful response time
-	LastExecutionTime  time.Duration // Last raw request latency (any attempt)
-	RollingCutoffRatio float64       // Normalized moving average of: (ExecutionTime / TimeoutThreshold)
-	FailureCount       int
-	TotalRequests      int
-	TotalFailures      int
-}
-
-var (
-	whisperNodes      []*WhisperNode
-	whisperNodesMutex sync.RWMutex
-)
-
-var ErrNoHealthyNodes = fmt.Errorf("all Whisper nodes are unhealthy")
-
-func getNextURL(urls []string, index *uint32) string {
-	if len(urls) == 0 {
-		return ""
-	}
-	newIdx := atomic.AddUint32(index, 1)
-	return urls[int(newIdx-1)%len(urls)]
-}
-
 type PiperNode struct {
 	URL           string
 	Zombie        bool
@@ -382,24 +355,12 @@ func getHealthyPiperNode() (*PiperNode, error) {
 	return nil, ErrNoPiperNodes
 }
 
-func getHealthyWhisperNode() (*WhisperNode, error) {
-	whisperNodesMutex.RLock()
-	defer whisperNodesMutex.RUnlock()
-
-	numNodes := len(whisperNodes)
-	if numNodes == 0 {
-		return nil, ErrNoHealthyNodes
+func getNextURL(urls []string, index *uint32) string {
+	if len(urls) == 0 {
+		return ""
 	}
-
-	for i := 0; i < numNodes; i++ {
-		idx := atomic.AddUint32(&whisperIndex, 1) - 1
-		node := whisperNodes[idx%uint32(numNodes)]
-		if !node.Zombie {
-			return node, nil
-		}
-	}
-
-	return nil, ErrNoHealthyNodes
+	newIdx := atomic.AddUint32(index, 1)
+	return urls[int(newIdx-1)%len(urls)]
 }
 
 func reloadConfig(path string) error {
@@ -419,22 +380,14 @@ func reloadConfig(path string) error {
 	config = newConfig
 	configMutex.Unlock()
 
-	// Initialize Whisper nodes
-	whisperNodesMutex.Lock()
-	existingNodes := make(map[string]*WhisperNode)
-	for _, node := range whisperNodes {
-		existingNodes[node.URL] = node
+	// Initialize/Update STT nodes
+	if sttManager == nil {
+		sttManager = stt.NewManager(newConfig.WhisperURLs, func(msg string) {
+			log.Println(msg)
+		})
+	} else {
+		sttManager.UpdateURLs(newConfig.WhisperURLs)
 	}
-	var newNodes []*WhisperNode
-	for _, url := range newConfig.WhisperURLs {
-		if node, exists := existingNodes[url]; exists {
-			newNodes = append(newNodes, node)
-		} else {
-			newNodes = append(newNodes, &WhisperNode{URL: url, Zombie: false})
-		}
-	}
-	whisperNodes = newNodes
-	whisperNodesMutex.Unlock()
 
 	// Initialize Piper nodes
 	piperNodesMutex.Lock()
@@ -1051,65 +1004,11 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	return false
 }
 
-// filterWhisperText determines if a transcription should be ignored as an artifact/hallucination
-func filterWhisperText(text string) (string, bool) {
-	text = strings.TrimSpace(text)
-	text = strings.ReplaceAll(text, "[BLANK_AUDIO]", "")
-	// Also remove common Whisper noise patterns
-	text = strings.ReplaceAll(text, "[Audio]", "")
-	text = strings.ReplaceAll(text, "(silence)", "")
-	text = strings.TrimSpace(text)
-
-	if text == "" || text == "." || text == "..." {
-		return "", true
-	}
-
-	lower := strings.ToLower(text)
-	// Remove common punctuation for hallucination check
-	cleaner := strings.Trim(lower, ".,!? ")
-
-	// Common Whisper artifacts/hallucinations
-	artifacts := []string{
-		"thank you",
-		"thank you.",
-		"thank you for watching",
-		"thanks for watching",
-		"bye",
-		"goodbye",
-		"you",
-		"please like and subscribe",
-	}
-
-	for _, a := range artifacts {
-		if cleaner == a {
-			return "", true
-		}
-	}
-
-	// Annotations like [BEEPING], (music), [AUDIO_OUT], etc.
-	// Check if it's entirely wrapped in brackets or parentheses
-	if (strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]")) ||
-		(strings.HasPrefix(text, "(") && strings.HasSuffix(text, ")")) {
-		// Specific system instructions we want to handle separately
-		lowerText := strings.ToLower(text)
-		if lowerText == "[pause]" || lowerText == "[resume]" || lowerText == "[request_sync]" {
-			return text, false // Pass through for handleSystemTranscription
-		}
-		return "", true
-	}
-
-	// Handle the very specific leading space " thank you" case
-	if strings.Contains(lower, "thank you") && len(text) < 15 {
-		return "", true
-	}
-
-	return text, false
-}
 
 // handleSystemTranscription checks for special system instructions and records them as system turns
 func handleSystemTranscription(session *ClientSession, text string, ws *websocket.Conn) bool {
 	lower := strings.ToLower(strings.TrimSpace(text))
-	if lower == "[pause]" || lower == "[resume]" || lower == "[request_sync]" || lower == "[whisper_status]" {
+	if lower == "[pause]" || lower == "[resume]" || lower == "[request_sync]" {
 		log.Printf("[STT] Intercepted system instruction: %s", lower)
 		session.Mutex.Lock()
 		t := session.ActiveThread()
@@ -1123,8 +1022,6 @@ func handleSystemTranscription(session *ClientSession, text string, ws *websocke
 			sendSettings(ws, session)
 			sendHistory(ws, session)
 			sendSummary(ws, session)
-		} else if lower == "[whisper_status]" {
-			broadcastWhisperStatus(session)
 		}
 		return true
 	}
@@ -1181,16 +1078,6 @@ func targetWebClients(session *ClientSession, data []byte) {
 		if meta.ClientType != "tool" {
 			conn.WriteMessage(websocket.TextMessage, data)
 		}
-	}
-}
-
-func broadcastWhisperStatus(session *ClientSession) {
-	whisperNodesMutex.RLock()
-	nodes := whisperNodes
-	data, err := json.Marshal(nodes)
-	whisperNodesMutex.RUnlock()
-	if err == nil {
-		sendOrBroadcastText(nil, session, []byte("[WHISPER_STATUS]"+string(data)))
 	}
 }
 
@@ -2692,10 +2579,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			session.Mutex.Unlock()
 
 			go func(audio []byte, bt time.Time, isA bool) {
-				text, err := queryWhisper(audio, session)
+				configMutex.RLock()
+				sampleRate := config.SampleRate
+				configMutex.RUnlock()
+
+				text, err := sttManager.Transcribe(context.Background(), audio, sampleRate)
 
 				if err != nil {
-					if err == ErrNoHealthyNodes {
+					if strings.Contains(err.Error(), "all STT nodes are unhealthy") {
 						session.Mutex.Lock()
 						t := session.ActiveThread()
 						failMsg := "[System: All STT nodes are currently offline or unhealthy. The user's most recent audio could not be transcribed. Please inform the user of this service interruption and offer to help via text instead.]"
@@ -2716,7 +2607,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("[STT] Whisper Transcribed: '%s' (Start: %v)", text, bt.Format("15:04:05.000"))
 
-				filteredText, isArtifact := filterWhisperText(text)
+				filteredText, isArtifact := stt.Filter(text)
 				if isArtifact {
 					log.Printf("[STT] Suppressed Whisper artifact: '%s'", text)
 					safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
@@ -2783,9 +2674,13 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 }
 
 func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio []byte) {
-	text, err := queryWhisper(audio, session)
+	configMutex.RLock()
+	sampleRate := config.SampleRate
+	configMutex.RUnlock()
+
+	text, err := sttManager.Transcribe(context.Background(), audio, sampleRate)
 	if err != nil {
-		if err == ErrNoHealthyNodes {
+		if strings.Contains(err.Error(), "all STT nodes are unhealthy") {
 			session.Mutex.Lock()
 			t := session.ActiveThread()
 			failMsg := "[System: All STT nodes are currently offline or unhealthy. The user's most recent audio could not be transcribed. Please inform the user of this service interruption and offer to help via text instead.]"
@@ -2806,7 +2701,7 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio [
 	}
 	log.Printf("[STT-Stream] Final Whisper Transcribed: '%s'", text)
 
-	filteredText, isArtifact := filterWhisperText(text)
+	filteredText, isArtifact := stt.Filter(text)
 	if isArtifact {
 		log.Printf("[STT-Stream] Suppressed Whisper artifact: '%s'", text)
 		safeWrite(ws, session, websocket.TextMessage, []byte("[IGNORED]"))
@@ -2838,122 +2733,6 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, audio [
 	}
 }
 
-func addWavHeader(pcmData []byte) []byte {
-	buf := new(bytes.Buffer)
-	// RIFF header
-	buf.Write([]byte("RIFF"))
-	binary.Write(buf, binary.LittleEndian, uint32(36+len(pcmData)))
-	buf.Write([]byte("WAVE"))
-	// fmt chunk
-	buf.Write([]byte("fmt "))
-	binary.Write(buf, binary.LittleEndian, uint32(16))
-	binary.Write(buf, binary.LittleEndian, uint16(1)) // AudioFormat: PCM
-	binary.Write(buf, binary.LittleEndian, uint16(1)) // NumChannels: Mono
-	configMutex.RLock()
-	sampleRate := config.SampleRate
-	configMutex.RUnlock()
-
-	binary.Write(buf, binary.LittleEndian, uint32(sampleRate))   // SampleRate: e.g. 16kHz
-	binary.Write(buf, binary.LittleEndian, uint32(sampleRate*2)) // ByteRate: SampleRate * NumChannels * BitsPerSample/8
-	binary.Write(buf, binary.LittleEndian, uint16(2))            // BlockAlign: NumChannels * BitsPerSample/8
-	binary.Write(buf, binary.LittleEndian, uint16(16))           // BitsPerSample: 16
-	// data chunk
-	buf.Write([]byte("data"))
-	binary.Write(buf, binary.LittleEndian, uint32(len(pcmData)))
-	buf.Write(pcmData)
-	return buf.Bytes()
-}
-
-func queryWhisper(audioData []byte, session *ClientSession) (string, error) {
-	if len(audioData) == 0 {
-		return "", fmt.Errorf("empty audio data")
-	}
-
-	durationSecs := float64(len(audioData)) / float64(config.SampleRate*2)
-	timeoutSecs := (durationSecs * 0.25) + 2.5
-	timeoutDuration := time.Duration(timeoutSecs * float64(time.Second))
-
-	wavData := addWavHeader(audioData)
-
-	for attempt := 0; attempt < 3; attempt++ {
-		node, err := getHealthyWhisperNode()
-		if err != nil {
-			return "", err
-		}
-
-		body := &bytes.Buffer{}
-		writer := multipart.NewWriter(body)
-		h := make(textproto.MIMEHeader)
-		h.Set("Content-Disposition", `form-data; name="file"; filename="input.wav"`)
-		h.Set("Content-Type", "audio/wav")
-		part, _ := writer.CreatePart(h)
-		part.Write(wavData)
-		writer.Close()
-
-		log.Printf("[STT] Sending audio to node: %s (Attempt %d)", node.URL, attempt+1)
-		start := time.Now()
-		resp, err := http.Post(node.URL, writer.FormDataContentType(), body)
-		duration := time.Since(start)
-
-		// Update raw metrics for every request attempt
-		node.LastExecutionTime = duration
-		ratio := duration.Seconds() / timeoutDuration.Seconds()
-		const alpha = 0.2
-		if node.RollingCutoffRatio == 0 {
-			node.RollingCutoffRatio = ratio
-		} else {
-			node.RollingCutoffRatio = (ratio * alpha) + (node.RollingCutoffRatio * (1.0 - alpha))
-		}
-		broadcastWhisperStatus(session)
-
-		node.TotalRequests++
-		if err != nil || resp.StatusCode != http.StatusOK || duration > timeoutDuration {
-			node.FailureCount++
-			node.TotalFailures++
-
-			statusStr := "N/A"
-			if resp != nil {
-				statusStr = resp.Status
-			}
-
-			if node.FailureCount >= 5 {
-				node.Zombie = true
-				log.Printf("[STT] Node flagged: %s (Duration: %v, Cutoff Ratio: %.2f, Status: %s, Err: %v).", node.URL, duration, ratio, statusStr, err)
-
-				// Notify the user via a system message in the thread
-				session.Mutex.Lock()
-				flagMsg := fmt.Sprintf("[System Note: Whisper node %s flagged as unhealthy/slow (%v). Routing to fallback.]", node.URL, duration.Truncate(time.Millisecond))
-				session.appendMessage("system", flagMsg, session.ActiveThread())
-				session.Mutex.Unlock()
-				saveSession(session)
-				sendHistory(nil, session) // Sync history to all clients
-			} else {
-				log.Printf("[STT] Node attempt failed: %s (Duration: %v, Cutoff Ratio: %.2f, Status: %s, Err: %v). Failures: %d/5", node.URL, duration, ratio, statusStr, err, node.FailureCount)
-			}
-
-			if resp != nil {
-				resp.Body.Close()
-			}
-			continue // Retry with another node
-		}
-		node.Zombie = false
-		node.LastResponseTime = duration
-		node.FailureCount = 0
-		broadcastWhisperStatus(session)
-		log.Printf("[STT] Node response: %s (Duration: %v, Cutoff Ratio: %.2f)", node.URL, duration.Truncate(time.Millisecond), ratio)
-
-		defer resp.Body.Close()
-		var result struct {
-			Text string `json:"text"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return "", err
-		}
-		return result.Text, nil
-	}
-
-	return "", fmt.Errorf("transcription failed after multiple attempts")
-}
 
 // buildToolSystemPrompt generates the JSON schema block for connected tools to inject into the LLM prompt.
 func getInternalTools() []Tool {
@@ -3434,19 +3213,18 @@ func getSystemStatusPrompt(session *ClientSession, provider string) string {
 	var sb strings.Builder
 
 	// 1. Whisper STT Nodes
-	whisperNodesMutex.RLock()
-	if len(whisperNodes) > 0 {
+	sttNodes := sttManager.GetStatus()
+	if len(sttNodes) > 0 {
 		sb.WriteString("\n\n### system status: Whisper STT Nodes\n")
-		for _, node := range whisperNodes {
-			status := "Healthy"
+		for _, node := range sttNodes {
+			st := "Healthy"
 			if node.Zombie {
-				status = "Zombie / Slow"
+				st = "Zombie / Slow"
 			}
 			sb.WriteString(fmt.Sprintf("- %s: %s (last latency: %v, rolling cutoff ratio: %.2f, failures: %d/%d)\n",
-				node.URL, status, node.LastExecutionTime.Truncate(time.Millisecond), node.RollingCutoffRatio, node.FailureCount, node.TotalFailures))
+				node.URL, st, node.LastExecutionTime.Truncate(time.Millisecond), node.RollingCutoffRatio, node.FailureCount, node.TotalFailures))
 		}
 	}
-	whisperNodesMutex.RUnlock()
 
 	// 2. Connected Users Monitor
 	activeSessionsMutex.Lock()
@@ -5284,18 +5062,16 @@ func handlePerformanceMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	perfMetricsMu.Lock()
-	whisperNodesMutex.RLock()
 	piperNodesMutex.RLock()
 	
 	resp := map[string]interface{}{
 		"llm":          perfMetrics,
-		"whisperNodes": whisperNodes,
+		"sttStatus":    sttManager.GetStatus(),
 		"piperNodes":   piperNodes,
 	}
 	data, err := json.MarshalIndent(resp, "", "  ")
 	
 	piperNodesMutex.RUnlock()
-	whisperNodesMutex.RUnlock()
 	perfMetricsMu.Unlock()
 	
 	if err != nil {
