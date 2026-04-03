@@ -621,16 +621,24 @@
         }
 
         function renderItem(item) {
+            const isSameItem = item.id === currentScratchId;
             currentScratchId = item.id;
             
-            // Reset transforms
-            scale = 1;
-            translateX = 0;
-            translateY = 0;
+            if (!isSameItem) {
+                // Reset transforms only if it's a different item
+                scale = 1;
+                translateX = 0;
+                translateY = 0;
+            }
             gesturesEnabled = (item.type === 'svg' || item.type === 'image_url');
             
             renderContainer.style.transition = 'none';
-            renderContainer.style.transform = `translate(0px, 0px) scale(1)`;
+            // Only apply initial transform if we reset or if it's new
+            if (!isSameItem) {
+                renderContainer.style.transform = `translate(0px, 0px) scale(1)`;
+            } else {
+                applyTransform();
+            }
             renderContainer.innerHTML = '';
             activeControls.style.display = 'flex';
             updateItemList();
@@ -738,6 +746,13 @@
             return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
         }
 
+        function clampTransforms() {
+            const limitX = viewArea.clientWidth * scale;
+            const limitY = viewArea.clientHeight * scale;
+            translateX = Math.min(Math.max(translateX, -limitX), limitX);
+            translateY = Math.min(Math.max(translateY, -limitY), limitY);
+        }
+
         function applyTransform() {
             if (rafId) cancelAnimationFrame(rafId);
             rafId = requestAnimationFrame(() => {
@@ -794,11 +809,7 @@
                 translateY += dy;
             }
 
-            // Clamping (simple bounds check)
-            const limitX = viewArea.clientWidth * scale;
-            const limitY = viewArea.clientHeight * scale;
-            translateX = Math.min(Math.max(translateX, -limitX), limitX);
-            translateY = Math.min(Math.max(translateY, -limitY), limitY);
+            clampTransforms();
 
             lastCentroidX = centroid.x;
             lastCentroidY = centroid.y;
@@ -823,6 +834,47 @@
         contentWrapper.addEventListener('touchmove', handleTouchMove, { passive: false });
         contentWrapper.addEventListener('touchend', handleTouchEnd);
         contentWrapper.addEventListener('touchcancel', handleTouchEnd);
+
+        // --- Mouse Panning Implementation ---
+        let isPanningMouse = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+
+        contentWrapper.addEventListener('mousedown', (e) => {
+            if (!gesturesEnabled) return;
+            if (e.button === 1 || e.button === 2) { // Middle or Right
+                isPanningMouse = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                e.preventDefault();
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isPanningMouse) return;
+            const dx = e.clientX - lastMouseX;
+            const dy = e.clientY - lastMouseY;
+            
+            translateX += dx;
+            translateY += dy;
+            clampTransforms();
+            
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            applyTransform();
+        });
+
+        window.addEventListener('mouseup', (e) => {
+            if (isPanningMouse) {
+                isPanningMouse = false;
+            }
+        });
+
+        contentWrapper.addEventListener('contextmenu', (e) => {
+            if (gesturesEnabled && isPanningMouse) {
+                e.preventDefault();
+            }
+        });
 
         // Desktop mouse wheel zoom with pivot
         contentWrapper.addEventListener('wheel', (e) => {

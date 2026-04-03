@@ -74,6 +74,9 @@ type Config struct {
 	FallbackLLM          FallbackLLMConfig         `json:"FallbackLLM"`
 	GeminiModels         []string                  `json:"GeminiModels"`
 	OllamaModels         []string                  `json:"OllamaModels"`
+	WhisperMinBuffer      float64                  `json:"WhisperMinBuffer"`
+	WhisperMaxBuffer      float64                  `json:"WhisperMaxBuffer"`
+	WhisperEnergyThreshold float64                 `json:"WhisperEnergyThreshold"`
 }
 
 type ModelRateLimit struct {
@@ -2733,9 +2736,12 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 			}
 
 			stream = &stt.StreamSession{
-				Manager:    sttManager,
-				PinnedURL:  pinnedURL,
-				SampleRate: sampleRate,
+				Manager:         sttManager,
+				PinnedURL:       pinnedURL,
+				SampleRate:      sampleRate,
+				MinBufferSecs:   config.WhisperMinBuffer,
+				MaxBufferSecs:   config.WhisperMaxBuffer,
+				EnergyThreshold: config.WhisperEnergyThreshold,
 				OnUpdate: func(fullTranscript string) {
 					log.Printf("[STT-Live] %d: %s", seqID, fullTranscript)
 					targetWebClients(session, []byte("[STT_LIVE]:"+fullTranscript))
@@ -3294,8 +3300,8 @@ func getSystemStatusPrompt(session *ClientSession, provider string) string {
 			if node.Zombie {
 				st = "Zombie / Slow"
 			}
-			sb.WriteString(fmt.Sprintf("- %s: %s (last latency: %v, rolling cutoff ratio: %.2f, failures: %d/%d)\n",
-				node.URL, st, node.LastExecutionTime.Truncate(time.Millisecond), node.RollingCutoffRatio, node.FailureCount, node.TotalFailures))
+			sb.WriteString(fmt.Sprintf("- %s: %s (last latency: %v, audio processed: %.1fs, failures: %d/%d)\n",
+				node.URL, st, node.LastExecutionTime.Truncate(time.Millisecond), float64(node.TotalAudioMs)/1000.0, node.FailureCount, node.TotalFailures))
 		}
 	}
 
@@ -5280,6 +5286,39 @@ func handlePerformanceMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	// Silent 404 if not admin or no session
+	cookie, err := r.Cookie("speax_session")
+	if err != nil || !IsAdminID(cookie.Value) {
+		http.NotFound(w, r)
+		return
+	}
+
+	sttStatus := sttManager.GetStatus()
+
+	piperNodesMutex.RLock()
+	ttsStatus := make([]map[string]interface{}, len(piperNodes))
+	for i, node := range piperNodes {
+		ttsStatus[i] = map[string]interface{}{
+			"url":            node.URL,
+			"healthy":        !node.Zombie,
+			"totalRequests":  node.TotalRequests,
+			"totalFailures":  node.TotalFailures,
+			"failureCount":   node.FailureCount,
+		}
+	}
+	piperNodesMutex.RUnlock()
+
+	resp := map[string]interface{}{
+		"stt": sttStatus,
+		"tts": ttsStatus,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 func main() {
 	go startBackupRoutine()
 
@@ -5289,6 +5328,7 @@ func main() {
 	http.HandleFunc("/api/models", handleModels)
 	http.HandleFunc("/api/voices", handleVoices)
 	http.HandleFunc("/api/performance-metrics", handlePerformanceMetrics)
+	http.HandleFunc("/status", handleStatus)
 	http.HandleFunc("/ws", handleConnections)
 	http.Handle("/", http.FileServer(http.Dir("./public")))
 

@@ -26,6 +26,7 @@ type Node struct {
 	FailureCount       int           `json:"FailureCount"`
 	TotalRequests      int           `json:"TotalRequests"`
 	TotalFailures      int           `json:"TotalFailures"`
+	TotalAudioMs       int64         `json:"TotalAudioMs"`
 }
 
 // Manager coordinates a pool of STT nodes.
@@ -131,6 +132,7 @@ func (m *Manager) TranscribePinned(ctx context.Context, pcmData []byte, sampleRa
 	}
 
 	durationSecs := float64(len(pcmData)) / float64(sampleRate*2)
+	audioMs := int64(durationSecs * 1000.0)
 	timeoutSecs := (durationSecs * 0.25) + 2.5
 	timeoutDuration := time.Duration(timeoutSecs * float64(time.Second))
 
@@ -159,6 +161,7 @@ func (m *Manager) TranscribePinned(ctx context.Context, pcmData []byte, sampleRa
 	m.mu.Lock()
 	node.LastExecutionTime = duration
 	node.TotalRequests++
+	node.TotalAudioMs += audioMs
 	if err != nil {
 		node.FailureCount++
 		node.TotalFailures++
@@ -198,6 +201,9 @@ type StreamSession struct {
 	LastInferenceAudio []byte
 	SampleRate         int
 	OnUpdate           func(fullTranscript string)
+	MinBufferSecs      float64
+	MaxBufferSecs      float64
+	EnergyThreshold    float64
 	
 	mu               sync.Mutex
 	inferenceActive  bool
@@ -222,13 +228,20 @@ func (s *StreamSession) PushAudio(data []byte) {
 	}
 	s.mu.Unlock()
 
-	// Heuristic: Trigger inference every 1.5 seconds of new audio
-	// or if we have at least 1.5 seconds and the energy is low (silence detection).
-	if bufferLen >= int(float64(s.SampleRate)*2*1.5) { // Min 1.5s
-		energy := AudioEnergy(data)
-		isSilence := energy < 0.05 // Slightly higher threshold for better responsiveness
+	// Heuristic: Trigger inference every X seconds of new audio
+	// or if we have at least X seconds and the energy is low (silence detection).
+	minBuffer := s.MinBufferSecs
+	if minBuffer <= 0 { minBuffer = 1.5 }
+	maxBuffer := s.MaxBufferSecs
+	if maxBuffer <= 0 { maxBuffer = 7.5 }
+	energyThresh := s.EnergyThreshold
+	if energyThresh <= 0 { energyThresh = 0.05 }
 
-		if bufferLen >= int(float64(s.SampleRate)*2*7.5) || isSilence { // Max 7.5s or silence
+	if bufferLen >= int(float64(s.SampleRate)*2*minBuffer) { 
+		energy := AudioEnergy(data)
+		isSilence := energy < energyThresh 
+
+		if bufferLen >= int(float64(s.SampleRate)*2*maxBuffer) || isSilence { 
 			s.mu.Lock()
 			if !s.inferenceActive {
 				s.inferenceActive = true
