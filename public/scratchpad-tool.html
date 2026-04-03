@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Speax ScratchPad</title>
+    <link rel="stylesheet" href="/tool-shared.css">
+    <link rel="stylesheet" id="hljs-theme" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <style>
+        :root {
+            --sidebar-width: 300px;
+            --sidebar-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        body.tool-content {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+            background: var(--background);
+        }
+
+        /* Sidebar Styles */
+        .sidebar {
+            width: var(--sidebar-width);
+            height: 100%;
+            background: var(--surface);
+            border-right: 1px solid var(--outline);
+            display: flex;
+            flex-direction: column;
+            transition: transform var(--sidebar-transition);
+            z-index: 1000;
+            position: absolute;
+            left: 0;
+            top: 0;
+            transform: translateX(0);
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                transform: translateX(-100%);
+                box-shadow: 10px 0 30px rgba(0,0,0,0.5);
+            }
+            .sidebar.open {
+                transform: translateX(0);
+            }
+            .sidebar-overlay {
+                display: none;
+                position: fixed;
+                inset: 0;
+                background: rgba(0,0,0,0.5);
+                z-index: 999;
+            }
+            .sidebar-overlay.visible {
+                display: block;
+            }
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--outline);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .device-name-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .device-name-input {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--primary);
+            font-size: 1.1rem;
+            font-weight: 700;
+            padding: 4px 8px;
+            border-radius: 4px;
+            width: 100%;
+            outline: none;
+        }
+
+        .device-name-input:focus {
+            background: var(--surface-variant);
+            border-color: var(--outline);
+        }
+
+        .search-container {
+            position: relative;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 8px 12px;
+            padding-left: 36px;
+            border-radius: 20px;
+            background: var(--surface-variant);
+            border: 1px solid var(--outline);
+            color: var(--on-surface);
+            font-size: 0.9rem;
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            opacity: 0.5;
+        }
+
+        .sidebar-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+        }
+
+        .item-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .scratch-item {
+            padding: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid transparent;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .scratch-item:hover {
+            background: var(--glass);
+        }
+
+        .scratch-item.active {
+            background: var(--primary-container);
+            color: var(--on-primary-container);
+            border-color: var(--primary);
+        }
+
+        .item-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            overflow: hidden;
+        }
+
+        .item-title {
+            font-weight: 600;
+            font-size: 0.95rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .item-meta {
+            font-size: 0.75rem;
+            opacity: 0.7;
+            text-transform: uppercase;
+        }
+
+        .sidebar-footer {
+            padding: 15px;
+            border-top: 1px solid var(--outline);
+        }
+
+        /* View Area Styles */
+        .view-area {
+            flex: 1;
+            height: 100%;
+            margin-left: var(--sidebar-width);
+            position: relative;
+            background: var(--background);
+            transition: margin-left var(--sidebar-transition);
+            overflow: hidden;
+        }
+
+        @media (max-width: 768px) {
+            .view-area {
+                margin-left: 0;
+            }
+        }
+
+        .view-controls {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            z-index: 100;
+            display: flex;
+            gap: 10px;
+        }
+
+        #menu-toggle {
+            display: none;
+            padding: 8px;
+            background: var(--surface);
+            border: 1px solid var(--outline);
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+        }
+
+        @media (max-width: 768px) {
+            #menu-toggle {
+                display: flex;
+            }
+        }
+
+        .active-item-controls {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            z-index: 500;
+            display: flex;
+            gap: 10px;
+        }
+
+        /* Content Rendering */
+        .content-wrapper {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            box-sizing: border-box;
+            touch-action: none;
+        }
+
+        .render-container {
+            max-width: 100%;
+            max-height: 100%;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            transform-origin: center center;
+        }
+
+        /* Specific Type Styles */
+        .render-text, .render-json {
+            white-space: pre-wrap;
+            font-family: 'Fira Code', 'Courier New', Courier, monospace;
+            padding: 40px;
+            background: var(--surface);
+            border-radius: 12px;
+            border: 1px solid var(--outline);
+            margin: auto;
+            width: fit-content;
+            min-width: 50%;
+        }
+
+        .render-markdown {
+            padding: 40px;
+            background: var(--surface);
+            border-radius: 12px;
+            border: 1px solid var(--outline);
+            width: 100%;
+            max-width: 800px;
+            margin: auto;
+            line-height: 1.6;
+            color: var(--on-surface);
+        }
+
+        .render-svg, .render-image {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: auto;
+        }
+
+        .render-svg svg, .render-image img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        /* Editor Overlay */
+        #editor-pane {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 90%;
+            max-width: 900px;
+            height: 80%;
+            background: var(--surface);
+            z-index: 2000;
+            border-radius: 16px;
+            box-shadow: 0 0 100px rgba(0,0,0,0.8);
+            display: none;
+            flex-direction: column;
+            border: 1px solid var(--outline);
+            overflow: hidden;
+        }
+
+        #editor-header {
+            padding: 15px 25px;
+            border-bottom: 1px solid var(--outline);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(0,0,0,0.2);
+        }
+
+        #editor-body {
+            flex: 1;
+            position: relative;
+        }
+
+        #ace-editor {
+            position: absolute;
+            inset: 0;
+        }
+
+        #editor-footer {
+            padding: 15px 25px;
+            border-top: 1px solid var(--outline);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(0,0,0,0.1);
+        }
+
+        .type-select {
+            padding: 6px 12px;
+            border-radius: 8px;
+            background: var(--surface-variant);
+            border: 1px solid var(--outline);
+            color: var(--on-surface);
+        }
+
+        .zoom-overlay {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.5);
+            backdrop-filter: blur(5px);
+            padding: 8px 15px;
+            border-radius: 20px;
+            color: white;
+            font-size: 0.8rem;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .zoom-overlay.visible {
+            opacity: 1;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/markdown-it/dist/markdown-it.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.7/ace.js"></script>
+</head>
+<body class="tool-content">
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="device-name-container">
+                <input type="text" id="device-name" class="device-name-input" placeholder="ScratchPad Name..." title="Click to rename this ScratchPad">
+            </div>
+            <div class="search-container">
+                <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input type="text" id="scratch-search" class="search-input" placeholder="Search items...">
+            </div>
+        </div>
+        <div class="sidebar-content">
+            <ul id="item-list" class="item-list">
+                <!-- Items populated by JS -->
+            </ul>
+        </div>
+        <div class="sidebar-footer">
+            <button class="primary" id="new-item-btn" style="width: 100%;">+ New Scratch</button>
+        </div>
+    </aside>
+
+    <main class="view-area" id="view-area">
+        <div class="view-controls">
+            <button id="menu-toggle" title="Toggle Menu">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+            </button>
+        </div>
+
+        <div class="active-item-controls" id="active-item-controls" style="display: none;">
+            <button class="small" id="edit-btn">Edit</button>
+            <button class="small secondary" id="delete-btn">Delete</button>
+        </div>
+
+        <div class="content-wrapper" id="content-wrapper">
+            <div class="render-container" id="render-container">
+                <div style="text-align: center; color: var(--on-surface-medium); font-style: italic; margin-top: 100px;">
+                    Select an item from the sidebar or create a new one.
+                </div>
+            </div>
+        </div>
+
+        <div class="zoom-overlay" id="zoom-overlay">Zoom: 100%</div>
+    </main>
+
+    <!-- Editor Pane -->
+    <div id="editor-pane">
+        <div id="editor-header">
+            <input type="text" id="editor-title" placeholder="Title..." style="background:transparent; border:none; color:inherit; font-size:1.2rem; font-weight:600; outline:none; flex:1">
+            <button class="btn-icon" id="close-editor">✕</button>
+        </div>
+        <div id="editor-body">
+            <div id="ace-editor"></div>
+        </div>
+        <div id="editor-footer">
+            <select id="scratch-type" class="type-select">
+                <option value="markdown">Markdown</option>
+                <option value="text">Plain Text</option>
+                <option value="json">JSON</option>
+                <option value="svg">SVG Code</option>
+                <option value="image_url">Image URL</option>
+            </select>
+            <button class="primary" id="save-scratch-btn">Save Scratch</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import { SpeaxToolClient } from '/speax-tool-client.mjs';
+        import { checkAuth, setupStatusIndicator, notifyParent } from '/tool-shared.mjs';
+
+        // --- Configuration & Initialization ---
+        const md = window.markdownit({ html: true, linkify: true, typographer: true });
+        let aceEditor = null;
+        let currentScratchId = null;
+        let isEditing = false;
+        let currentDeviceName = "";
+
+        // Gesture state
+        let scale = 1;
+        let translateX = 0;
+        let translateY = 0;
+        let lastCentroidX = 0;
+        let lastCentroidY = 0;
+        let lastDist = 0;
+        let gesturesEnabled = false;
+        let isMoving = false;
+        let rafId = null;
+
+        // UI Elements
+        const deviceNameInput = document.getElementById('device-name');
+        const scratchSearch = document.getElementById('scratch-search');
+        const itemList = document.getElementById('item-list');
+        const newItemBtn = document.getElementById('new-item-btn');
+        const menuToggle = document.getElementById('menu-toggle');
+        const sidebar = document.getElementById('sidebar');
+        const overlay = document.getElementById('sidebar-overlay');
+        const viewArea = document.getElementById('view-area');
+        const renderContainer = document.getElementById('render-container');
+        const contentWrapper = document.getElementById('content-wrapper');
+        const activeControls = document.getElementById('active-item-controls');
+        const editBtn = document.getElementById('edit-btn');
+        const deleteBtn = document.getElementById('delete-btn');
+        const zoomOverlay = document.getElementById('zoom-overlay');
+
+        // Editor elements
+        const editorPane = document.getElementById('editor-pane');
+        const editorTitle = document.getElementById('editor-title');
+        const scratchTypeSelect = document.getElementById('scratch-type');
+        const saveBtn = document.getElementById('save-scratch-btn');
+        const closeBtn = document.getElementById('close-editor');
+
+        // --- Device Discovery ---
+        function getInitialDeviceName() {
+            const storedName = localStorage.getItem('speax_scratchpad_active_name');
+            if (storedName) return storedName;
+
+            const ua = navigator.userAgent;
+            if (/Pixel/i.test(ua)) return "Pixel";
+            if (/iPhone/i.test(ua)) return "iPhone";
+            if (/iPad/i.test(ua)) return "iPad";
+            if (/Android/i.test(ua)) return "Android";
+            if (/Macintosh/i.test(ua)) return "Mac";
+            if (/Windows/i.test(ua)) return "PC";
+            return "ScratchPad";
+        }
+
+        currentDeviceName = getInitialDeviceName();
+        deviceNameInput.value = currentDeviceName;
+
+        // --- Storage Management ---
+        function getStorageKey() {
+            return `speax_scratchpad_items_${currentDeviceName.toLowerCase()}`;
+        }
+
+        function getItems() {
+            return JSON.parse(localStorage.getItem(getStorageKey()) || '[]');
+        }
+
+        function saveItems(items) {
+            localStorage.setItem(getStorageKey(), JSON.stringify(items));
+        }
+
+        // --- Speax Integration ---
+        const toolClient = new SpeaxToolClient(window.location.origin, `ScratchPad ${currentDeviceName}`);
+        
+        toolClient.registerAction('get_scratches', 'List all named elements in the scratchpad.', {}, async () => {
+            const items = getItems().map(i => ({ id: i.id, title: i.title, type: i.type }));
+            return { items };
+        });
+
+        toolClient.registerAction('read_scratch', 'Read the content of a specific scratch item.', {
+            type: 'object', properties: { id: { type: 'string' } }, required: ['id']
+        }, async (p) => {
+            const item = getItems().find(i => i.id === p.id);
+            if (!item) throw new Error("Item not found");
+            renderItem(item);
+            return item;
+        });
+
+        toolClient.registerAction('create_scratch', 'Create a new scratch item.', {
+            type: 'object', 
+            properties: { 
+                title: { type: 'string' }, 
+                content: { type: 'string' },
+                type: { type: 'string', enum: ['markdown', 'text', 'json', 'svg', 'image_url'] }
+            }, 
+            required: ['title', 'content']
+        }, async (p) => {
+            const newItem = {
+                id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString() + Math.random().toString(36).substr(2, 9),
+                title: p.title,
+                content: p.content,
+                type: p.type || 'markdown',
+                updated: new Date().toISOString()
+            };
+            const items = getItems();
+            items.unshift(newItem);
+            saveItems(items);
+            updateItemList();
+            renderItem(newItem);
+            return { id: newItem.id, status: "created" };
+        });
+
+        toolClient.registerAction('update_scratch', 'Update an existing scratch item. Use this to refine or change content.', {
+            type: 'object',
+            properties: {
+                id: { type: 'string' },
+                title: { type: 'string' },
+                content: { type: 'string' },
+                type: { type: 'string', enum: ['markdown', 'text', 'json', 'svg', 'image_url'] }
+            },
+            required: ['id']
+        }, async (p) => {
+            const items = getItems();
+            const idx = items.findIndex(i => i.id === p.id);
+            if (idx === -1) throw new Error("Item not found");
+            
+            if (p.title !== undefined) items[idx].title = p.title;
+            if (p.content !== undefined) items[idx].content = p.content;
+            if (p.type !== undefined) items[idx].type = p.type;
+            items[idx].updated = new Date().toISOString();
+            
+            saveItems(items);
+            updateItemList();
+            if (currentScratchId === p.id) renderItem(items[idx]);
+            return { id: p.id, status: "updated" };
+        });
+
+        toolClient.registerAction('delete_scratch', 'Delete a specific scratch item.', {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id']
+        }, async (p) => {
+            const items = getItems();
+            const newItems = items.filter(i => i.id !== p.id);
+            if (items.length === newItems.length) throw new Error("Item not found");
+            
+            saveItems(newItems);
+            updateItemList();
+            if (currentScratchId === p.id) {
+                currentScratchId = null;
+                renderContainer.innerHTML = '<div style="text-align: center; color: var(--on-surface-medium); font-style: italic; margin-top: 100px;">Select an item from the sidebar or create a new one.</div>';
+                activeControls.style.display = 'none';
+            }
+            return { id: p.id, status: "deleted" };
+        });
+
+        toolClient.connect();
+
+        // --- UI Logic ---
+        function updateItemList() {
+            const query = scratchSearch.value.toLowerCase();
+            const items = getItems().filter(i => 
+                i.title.toLowerCase().includes(query) || 
+                i.content.toLowerCase().includes(query)
+            );
+
+            itemList.innerHTML = '';
+            items.forEach(item => {
+                const li = document.createElement('li');
+                li.className = `scratch-item ${currentScratchId === item.id ? 'active' : ''}`;
+                li.innerHTML = `
+                    <div class="item-info">
+                        <div class="item-title">${item.title}</div>
+                        <div class="item-meta">${item.type}</div>
+                    </div>
+                `;
+                li.onclick = () => {
+                    renderItem(item);
+                    if (window.innerWidth <= 768) closeSidebar();
+                };
+                itemList.appendChild(li);
+            });
+        }
+
+        function renderItem(item) {
+            currentScratchId = item.id;
+            
+            // Reset transforms
+            scale = 1;
+            translateX = 0;
+            translateY = 0;
+            gesturesEnabled = (item.type === 'svg' || item.type === 'image_url');
+            
+            renderContainer.style.transition = 'none';
+            renderContainer.style.transform = `translate(0px, 0px) scale(1)`;
+            renderContainer.innerHTML = '';
+            activeControls.style.display = 'flex';
+            updateItemList();
+
+            const wrapper = document.createElement('div');
+            wrapper.className = `render-${item.type.replace('_', '-')}`;
+
+            const content = (item.content || "").replace(/\\n/g, '\n');
+
+            if (item.type === 'markdown') {
+                wrapper.innerHTML = md.render(content);
+            } else if (item.type === 'text') {
+                wrapper.textContent = content;
+            } else if (item.type === 'json') {
+                try {
+                    const obj = JSON.parse(content);
+                    const pretty = JSON.stringify(obj, null, 2);
+                    wrapper.innerHTML = `<code>${hljs.highlight(pretty, { language: 'json' }).value}</code>`;
+                } catch (e) {
+                    wrapper.textContent = content;
+                }
+            } else if (item.type === 'svg') {
+                wrapper.innerHTML = content;
+                // Ensure SVG has appropriate sizing
+                const svg = wrapper.querySelector('svg');
+                if (svg) {
+                    if (!svg.getAttribute('viewBox') && svg.getAttribute('width') && svg.getAttribute('height')) {
+                        svg.setAttribute('viewBox', `0 0 ${svg.getAttribute('width')} ${svg.getAttribute('height')}`);
+                    }
+                    svg.style.width = '100%';
+                    svg.style.height = 'auto';
+                }
+            } else if (item.type === 'image_url') {
+                const img = document.createElement('img');
+                img.src = item.content;
+                img.alt = item.title;
+                wrapper.appendChild(img);
+            }
+
+            renderContainer.appendChild(wrapper);
+            notifyParent('SCRATCH_VIEW', { id: item.id, title: item.title });
+        }
+
+        function openEditor(item = null) {
+            isEditing = true;
+            currentScratchId = item ? item.id : null;
+            editorPane.style.display = 'flex';
+            
+            if (!aceEditor) {
+                aceEditor = ace.edit("ace-editor");
+                aceEditor.setTheme("ace/theme/tomorrow_night_eighties");
+                aceEditor.setOptions({
+                    fontSize: "14px",
+                    showPrintMargin: false,
+                    useSoftTabs: true,
+                    tabSize: 2,
+                    wrap: true
+                });
+            }
+
+            if (item) {
+                editorTitle.value = item.title;
+                scratchTypeSelect.value = item.type;
+                aceEditor.setValue(item.content, -1);
+                updateAceMode(item.type);
+            } else {
+                editorTitle.value = "";
+                scratchTypeSelect.value = "markdown";
+                aceEditor.setValue("", -1);
+                updateAceMode("markdown");
+            }
+
+            aceEditor.focus();
+        }
+
+        function updateAceMode(type) {
+            let mode = "ace/mode/markdown";
+            if (type === 'json') mode = "ace/mode/json";
+            if (type === 'svg') mode = "ace/mode/xml";
+            if (type === 'text' || type === 'image_url') mode = "ace/mode/text";
+            aceEditor.session.setMode(mode);
+        }
+
+        function closeSidebar() {
+            sidebar.classList.remove('open');
+            overlay.classList.remove('visible');
+        }
+
+        function openSidebar() {
+            sidebar.classList.add('open');
+            overlay.classList.add('visible');
+        }
+
+        // --- Pinch-Zoom & Pan Implementation ---
+        function getCentroid(touches) {
+            let x = 0, y = 0;
+            for (let i = 0; i < touches.length; i++) {
+                x += touches[i].clientX;
+                y += touches[i].clientY;
+            }
+            return { x: x / touches.length, y: y / touches.length };
+        }
+
+        function getDist(touches) {
+            return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+        }
+
+        function applyTransform() {
+            if (rafId) cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(() => {
+                renderContainer.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+                
+                zoomOverlay.textContent = `Zoom: ${Math.round(scale * 100)}%`;
+                if (scale !== 1 || translateX !== 0 || translateY !== 0) {
+                    zoomOverlay.classList.add('visible');
+                    clearTimeout(window.zoomTimeout);
+                    window.zoomTimeout = setTimeout(() => zoomOverlay.classList.remove('visible'), 2000);
+                }
+            });
+        }
+
+        function handleTouchStart(e) {
+            if (!gesturesEnabled) return;
+            isMoving = true;
+            const centroid = getCentroid(e.touches);
+            lastCentroidX = centroid.x;
+            lastCentroidY = centroid.y;
+            
+            if (e.touches.length === 2) {
+                lastDist = getDist(e.touches);
+            }
+            // Prevent default to stop scrolling/pull-to-refresh
+            if (e.cancelable) e.preventDefault();
+        }
+
+        function handleTouchMove(e) {
+            if (!gesturesEnabled || !isMoving) return;
+            
+            const centroid = getCentroid(e.touches);
+            const dx = centroid.x - lastCentroidX;
+            const dy = centroid.y - lastCentroidY;
+
+            if (e.touches.length === 2) {
+                const dist = getDist(e.touches);
+                const newScale = Math.min(Math.max(0.1, scale * (dist / lastDist)), 10);
+                
+                // Pivot point math
+                // New_Offset = Current_Offset + (Center_Point - Current_Offset) * (1 - New_Scale / Old_Scale)
+                // We apply this adjustment to translateX/Y before applying the new scale
+                const ratio = 1 - (newScale / scale);
+                translateX += (centroid.x - (viewArea.clientWidth / 2 + translateX)) * ratio;
+                translateY += (centroid.y - (viewArea.clientHeight / 2 + translateY)) * ratio;
+                
+                scale = newScale;
+                lastDist = dist;
+            }
+            
+            // Standard Panning (works for 1 finger or 2 finger centroid move)
+            if (scale > 1.0 || e.touches.length === 1) {
+                translateX += dx;
+                translateY += dy;
+            }
+
+            // Clamping (simple bounds check)
+            const limitX = viewArea.clientWidth * scale;
+            const limitY = viewArea.clientHeight * scale;
+            translateX = Math.min(Math.max(translateX, -limitX), limitX);
+            translateY = Math.min(Math.max(translateY, -limitY), limitY);
+
+            lastCentroidX = centroid.x;
+            lastCentroidY = centroid.y;
+            
+            applyTransform();
+            if (e.cancelable) e.preventDefault();
+        }
+
+        function handleTouchEnd(e) {
+            if (e.touches.length === 0) {
+                isMoving = false;
+            } else {
+                // Reset centroid tracking for remaining fingers
+                const centroid = getCentroid(e.touches);
+                lastCentroidX = centroid.x;
+                lastCentroidY = centroid.y;
+                if (e.touches.length === 2) lastDist = getDist(e.touches);
+            }
+        }
+
+        contentWrapper.addEventListener('touchstart', handleTouchStart, { passive: false });
+        contentWrapper.addEventListener('touchmove', handleTouchMove, { passive: false });
+        contentWrapper.addEventListener('touchend', handleTouchEnd);
+        contentWrapper.addEventListener('touchcancel', handleTouchEnd);
+
+        // Desktop mouse wheel zoom with pivot
+        contentWrapper.addEventListener('wheel', (e) => {
+            if (!gesturesEnabled) return;
+            if (e.ctrlKey || e.metaKey) {
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                const newScale = Math.min(Math.max(0.1, scale * delta), 10);
+                
+                const ratio = 1 - (newScale / scale);
+                translateX += (e.clientX - (viewArea.clientWidth / 2 + translateX)) * ratio;
+                translateY += (e.clientY - (viewArea.clientHeight / 2 + translateY)) * ratio;
+                
+                scale = newScale;
+                applyTransform();
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+        function setZoom(z) {
+            // Legacy support for AI tool calls
+            scale = Math.min(Math.max(0.1, z), 10);
+            translateX = 0;
+            translateY = 0;
+            applyTransform();
+        }
+
+        // --- Event Listeners ---
+        deviceNameInput.onchange = () => {
+            const newName = deviceNameInput.value.trim() || "ScratchPad";
+            currentDeviceName = newName;
+            localStorage.setItem('speax_scratchpad_active_name', newName);
+            updateItemList();
+            // Re-label client? Usually require reload for simple client
+            window.location.reload(); 
+        };
+
+        scratchSearch.oninput = () => updateItemList();
+        newItemBtn.onclick = () => openEditor();
+        menuToggle.onclick = () => openSidebar();
+        overlay.onclick = () => closeSidebar();
+
+        editBtn.onclick = () => {
+            const item = getItems().find(i => i.id === currentScratchId);
+            if (item) openEditor(item);
+        };
+
+        deleteBtn.onclick = () => {
+            if (confirm("Delete this scratch item?")) {
+                const items = getItems().filter(i => i.id !== currentScratchId);
+                saveItems(items);
+                currentScratchId = null;
+                renderContainer.innerHTML = '<div style="text-align: center; color: var(--on-surface-medium); font-style: italic; margin-top: 100px;">Select an item from the sidebar or create a new one.</div>';
+                activeControls.style.display = 'none';
+                updateItemList();
+            }
+        };
+
+        closeBtn.onclick = () => {
+            editorPane.style.display = 'none';
+            isEditing = false;
+        };
+
+        scratchTypeSelect.onchange = () => updateAceMode(scratchTypeSelect.value);
+
+        saveBtn.onclick = () => {
+            const title = editorTitle.value.trim() || "Untitled Scratch";
+            const content = aceEditor.getValue();
+            const type = scratchTypeSelect.value;
+            const items = getItems();
+
+            if (currentScratchId) {
+                // Update
+                const idx = items.findIndex(i => i.id === currentScratchId);
+                if (idx !== -1) {
+                    items[idx] = { ...items[idx], title, content, type, updated: new Date().toISOString() };
+                } else {
+                    // Item was deleted or ID lost? Create new.
+                    const newItem = {
+                        id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString() + Math.random().toString(36).substr(2, 9),
+                        title,
+                        content,
+                        type,
+                        updated: new Date().toISOString()
+                    };
+                    items.unshift(newItem);
+                    currentScratchId = newItem.id;
+                }
+            } else {
+                // Create
+                const newItem = {
+                    id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString() + Math.random().toString(36).substr(2, 9),
+                    title,
+                    content,
+                    type,
+                    updated: new Date().toISOString()
+                };
+                items.unshift(newItem);
+                currentScratchId = newItem.id;
+            }
+
+            saveItems(items);
+            updateItemList();
+            renderItem(items.find(i => i.id === currentScratchId));
+            editorPane.style.display = 'none';
+            isEditing = false;
+        };
+
+        // Hotkeys
+        window.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 's' && isEditing) {
+                e.preventDefault();
+                saveBtn.click();
+            }
+            if (e.key === 'Escape' && isEditing) {
+                closeBtn.click();
+            }
+        });
+
+        // Initialize lists
+        updateItemList();
+
+        // Optional: Auto-select first item if exists
+        const initialItems = getItems();
+        if (initialItems.length > 0) {
+            renderItem(initialItems[0]);
+        }
+
+    </script>
+</body>
+</html>
