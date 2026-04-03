@@ -77,9 +77,10 @@ type Config struct {
 }
 
 type ModelRateLimit struct {
-	RPM int `json:"RPM"` // Requests Per Minute
-	TPM int `json:"TPM"` // Tokens Per Minute
-	RPD int `json:"RPD"` // Requests Per Day
+	RPM      int    `json:"RPM"` // Requests Per Minute
+	TPM      int    `json:"TPM"` // Tokens Per Minute
+	RPD      int    `json:"RPD"` // Requests Per Day
+	Fallback string `json:"fallback"`
 }
 
 func (c *Config) Validate() error {
@@ -1597,6 +1598,53 @@ func (s *ClientSession) isFallbackModel(model string) bool {
 		}
 	}
 	return false
+}
+
+// resolveFallback returns the next (provider, model) in the fallback chain.
+// If the model has a specific fallback configured, it uses that.
+// If it specifies "[FallbackLLM]" or has no fallback, it returns the global FallbackLLM.
+func (s *ClientSession) resolveFallback(currentModel string) (string, string) {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+
+	limits, ok := config.ModelLimits[currentModel]
+	fallback := ""
+	if ok {
+		fallback = limits.Fallback
+	}
+
+	// Default to global fallback if no specific fallback or [FallbackLLM]
+	if fallback == "" || fallback == "[FallbackLLM]" {
+		if len(config.FallbackLLM.Models) > 0 {
+			return "ollama", config.FallbackLLM.Models[0]
+		}
+		return "", ""
+	}
+
+	// Resolve provider for the named fallback model
+	for _, m := range config.GeminiModels {
+		if m == fallback {
+			return "gemini", fallback
+		}
+	}
+	for _, m := range config.OllamaModels {
+		if m == fallback {
+			return "ollama", fallback
+		}
+	}
+
+	// If not found in lists, check if it has a limit entry (usually enough to identify)
+	if _, exists := config.ModelLimits[fallback]; exists {
+		// Heuristic: models with ":" or starting with llama/gemma/phi are usually ollama
+		low := strings.ToLower(fallback)
+		if strings.Contains(low, ":") || strings.HasPrefix(low, "llama") || strings.HasPrefix(low, "gemma") || strings.HasPrefix(low, "phi") {
+			return "ollama", fallback
+		}
+		return "gemini", fallback
+	}
+
+	// Last resort: assume it's an ollama model if not recognized as Gemini
+	return "ollama", fallback
 }
 
 func getMidnightPTBound(now time.Time) time.Time {
@@ -3161,67 +3209,7 @@ func getOllamaModelsInternal(isAdmin bool) []ModelData {
 	return out
 }
 
-func selectFallbackModel() (string, string) {
-	configMutex.RLock()
-	fbURL := config.FallbackLLM.URL
-	fbModels := config.FallbackLLM.Models
-	configMutex.RUnlock()
-
-	if fbURL == "" || len(fbModels) == 0 {
-		return "", ""
-	}
-
-	// Strip any existing API path (e.g. /api/chat) so we always hit the root /api/tags endpoint
-	parsedURL, parseErr := url.Parse(fbURL)
-	var tagsURL string
-	if parseErr == nil {
-		tagsURL = parsedURL.Scheme + "://" + parsedURL.Host + "/api/tags"
-	} else {
-		// Fallback: best-effort strip known API suffixes
-		base := strings.TrimSuffix(strings.TrimSuffix(fbURL, "/"), "/api/chat")
-		base = strings.TrimSuffix(base, "/api/generate")
-		tagsURL = strings.TrimSuffix(base, "/") + "/api/tags"
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(tagsURL)
-	if err != nil {
-		log.Printf("[Fallback] Failed to check Ollama tags at %s: %v", tagsURL, err)
-		return "", ""
-	}
-	defer resp.Body.Close()
-
-	var res struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		log.Printf("[Fallback] Failed to parse Ollama tags: %v", err)
-		return "", ""
-	}
-
-	available := make(map[string]bool)
-	for _, m := range res.Models {
-		available[m.Name] = true
-	}
-
-	for _, preferred := range fbModels {
-		if available[preferred] {
-			return "ollama", preferred
-		}
-	}
-
-	// If no exact match, try partial match (e.g. "llama3" matching "llama3:latest")
-	for _, preferred := range fbModels {
-		for _, m := range res.Models {
-			if strings.HasPrefix(m.Name, preferred+":") || m.Name == preferred {
-				return "ollama", m.Name
-			}
-		}
-	}
-
-	return "", ""
-}
+// selectFallbackModel is deprecated. Use (s *ClientSession).resolveFallback and the traversal logic in streamLLMAndTTSInternal.
 
 func getGeminiModelsInternal(apiKey string, isAdmin bool) []ModelData {
 	var out []ModelData
@@ -3637,31 +3625,53 @@ func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.C
 		log.Printf("[LLM] Rate limit exceeded for client %s model %s: %v", session.ClientID, model, err)
 
 		// 3. Fallback Logic: Try to find a fallback if current model is limited
-		fallbackProvider, fallbackModel := selectFallbackModel()
-		if fallbackProvider != "" && fallbackModel != model {
-			session.Mutex.Lock()
-			// Remember original if not already in fallback state
-			if session.FallbackOriginalModel == "" {
-				session.FallbackOriginalModel = model
-				session.FallbackOriginalProvider = session.Provider
+		seen := map[string]bool{model: true}
+		current := model
+		for {
+			fallbackProvider, fallbackModel := session.resolveFallback(current)
+			if fallbackProvider == "" || fallbackModel == "" || seen[fallbackModel] {
+				// No fallback possible OR loop detected: jump to global fallback if not already tried
+				configMutex.RLock()
+				fbModels := config.FallbackLLM.Models
+				configMutex.RUnlock()
+				if len(fbModels) > 0 && !seen[fbModels[0]] {
+					fallbackProvider = "ollama"
+					fallbackModel = fbModels[0]
+				} else {
+					// Truly exhausted
+					break
+				}
 			}
-			session.Model = fallbackModel
-			session.Provider = fallbackProvider
-			t := session.ActiveThread()
-			msg := fmt.Sprintf("[Rate Limit hit for %s]: %v. Switching to fallback %s %s until limits reset.", model, err, fallbackProvider, fallbackModel)
-			session.appendMessage("system", msg, t)
-			session.Mutex.Unlock()
-			log.Printf("[LLM] %s", msg)
 
-			// Process session saving and audio notification asynchronously to reduce latency
-			// for starting the fallback LLM request.
-			go func(s *ClientSession, m string, conn *websocket.Conn) {
-				saveSession(s)
-				injectSystemAudio(m, conn, s)
-			}(session, "Just a head's up, we've hit a rate limits on youre selected LLM! We're going to fail over to local processing for a bit", ws)
+			// Check if this fallback candidate is also rate-limited
+			_, err := session.checkRateLimit(fallbackModel)
+			if err == nil {
+				// Success! Use this model
+				session.Mutex.Lock()
+				if session.FallbackOriginalModel == "" {
+					session.FallbackOriginalModel = model
+					session.FallbackOriginalProvider = session.Provider
+				}
+				session.Model = fallbackModel
+				session.Provider = fallbackProvider
+				t := session.ActiveThread()
+				msg := fmt.Sprintf("[Rate Limit hit for %s]: %v. Switching to fallback %s %s until limits reset.", model, err, fallbackProvider, fallbackModel)
+				session.appendMessage("system", msg, t)
+				session.Mutex.Unlock()
+				log.Printf("[LLM] %s", msg)
 
-			// Recurse to use the new fallback model (pass isFallback=true to skip recovery check)
-			return streamLLMAndTTSInternal(ctx, prompt, ws, session, true)
+				go func(s *ClientSession, m string, conn *websocket.Conn) {
+					saveSession(s)
+					injectSystemAudio(m, conn, s)
+				}(session, "Just a head's up, we've hit a rate limits on youre selected LLM! We're going to fail over to fallback processing for a bit", ws)
+
+				return streamLLMAndTTSInternal(ctx, prompt, ws, session, true)
+			}
+
+			// Still limited, move to next linked model in chain
+			log.Printf("[LLM] Fallback candidate %s is also rate-limited, continuing chain...", fallbackModel)
+			current = fallbackModel
+			seen[current] = true
 		}
 
 		// If no fallback available, block as before
@@ -3876,36 +3886,68 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		err := fmt.Errorf("Gemini API error: %s", statusText)
 		log.Println(err)
 
-		// Check for fallback triggers: 503 (Service Unavailable) or 429 (Too Many Requests)
-		if resp.StatusCode == 503 || resp.StatusCode == 429 {
-			fallbackProvider, fallbackModel := selectFallbackModel()
-			if fallbackProvider != "" {
-				explanation := "Service Unavailable"
-				if resp.StatusCode == 429 {
-					explanation = "Too Many Requests (Rate Limited)"
+		// Check for fallback triggers: 503 (Service Unavailable), 429 (Too Many Requests), or 500 (Internal Server Error)
+		if resp.StatusCode == 503 || resp.StatusCode == 429 || resp.StatusCode == 500 {
+			seen := map[string]bool{model: true}
+			current := model
+			found := false
+			var fbProv, fbModel string
+
+			for {
+				fbProv, fbModel = session.resolveFallback(current)
+				if fbProv == "" || fbModel == "" || seen[fbModel] {
+					// Link broken or loop: jump to global fallback
+					configMutex.RLock()
+					fbModels := config.FallbackLLM.Models
+					configMutex.RUnlock()
+					if len(fbModels) > 0 && !seen[fbModels[0]] {
+						fbProv = "ollama"
+						fbModel = fbModels[0]
+					} else {
+						break
+					}
 				}
 
-				msg := fmt.Sprintf("[SYSTEM] Error communicating with API %d %s, switching to %s %s",
-					resp.StatusCode, explanation, fallbackProvider, fallbackModel)
+				// Check if this fallback is healthy
+				_, err := session.checkRateLimit(fbModel)
+				if err == nil {
+					found = true
+					break
+				}
+				current = fbModel
+				seen[current] = true
+			}
+
+			if found {
+				explanation := fmt.Sprintf("API Error %d", resp.StatusCode)
+				msg := fmt.Sprintf("[SYSTEM] Error communicating with API (%s), switching to %s %s",
+					explanation, fbProv, fbModel)
 				log.Println(msg)
 
 				session.Mutex.Lock()
+				if session.FallbackOriginalModel == "" {
+					session.FallbackOriginalModel = model
+					session.FallbackOriginalProvider = session.Provider
+				}
+				session.Provider = fbProv
+				session.Model = fbModel
 				t := session.ActiveThread()
 				session.appendMessage("system", msg, t)
-				session.Provider = fallbackProvider
-				session.Model = fallbackModel
 				session.Mutex.Unlock()
 
-				// Process session saving and audio notification asynchronously to reduce latency
 				go func(s *ClientSession, m string, conn *websocket.Conn) {
 					saveSession(s)
 					injectSystemAudio(m, conn, s)
-				}(session, "LLM limits hit, failing over to local processing", ws)
+				}(session, "LLM limits hit or service error, failing over to fallback processing", ws)
 
-				// Recursive call into the fallback provider
-				if fallbackProvider == "ollama" {
+				if fbProv == "ollama" {
 					return streamOllamaAndTTS(ctx, prompt, ws, session)
 				}
+				return streamGeminiAndTTS(ctx, prompt, ws, session, apiKey)
+			} else {
+				// Critical failure! No models left.
+				log.Printf("[Gemini] CRITICAL FAILURE: All model fallbacks exhausted for client %s", session.ClientID)
+				go injectSystemAudio("Sorry, theres a critical failure in the system, we can't currently access any of the LLM services. Please check back later.", ws, session)
 			}
 		}
 
@@ -4306,8 +4348,79 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 	if resp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("ollama API error: %s - %s", resp.Status, string(bodyBytes))
+		statusText := resp.Status
+		err := fmt.Errorf("ollama API error: %s - %s", statusText, string(bodyBytes))
 		log.Println(err)
+
+		// Check for fallback triggers: 503 (Service Unavailable), 429 (Too Many Requests), or 500 (Internal Server Error)
+		if resp.StatusCode == 503 || resp.StatusCode == 429 || resp.StatusCode == 500 {
+			seen := map[string]bool{model: true}
+			current := model
+			found := false
+			var fbProv, fbModel string
+
+			for {
+				fbProv, fbModel = session.resolveFallback(current)
+				if fbProv == "" || fbModel == "" || seen[fbModel] {
+					// Link broken or loop: jump to global fallback
+					configMutex.RLock()
+					fbModels := config.FallbackLLM.Models
+					configMutex.RUnlock()
+					if len(fbModels) > 0 && !seen[fbModels[0]] {
+						fbProv = "ollama"
+						fbModel = fbModels[0]
+					} else {
+						break
+					}
+				}
+
+				// Check if this fallback is healthy
+				_, err := session.checkRateLimit(fbModel)
+				if err == nil {
+					found = true
+					break
+				}
+				current = fbModel
+				seen[current] = true
+			}
+
+			if found {
+				explanation := fmt.Sprintf("Ollama Error %d", resp.StatusCode)
+				msg := fmt.Sprintf("[SYSTEM] Error communicating with Ollama (%s), switching to %s %s",
+					explanation, fbProv, fbModel)
+				log.Println(msg)
+
+				session.Mutex.Lock()
+				if session.FallbackOriginalModel == "" {
+					session.FallbackOriginalModel = model
+					session.FallbackOriginalProvider = session.Provider
+				}
+				session.Provider = fbProv
+				session.Model = fbModel
+				t := session.ActiveThread()
+				session.appendMessage("system", msg, t)
+				session.Mutex.Unlock()
+
+				go func(s *ClientSession, m string, conn *websocket.Conn) {
+					saveSession(s)
+					injectSystemAudio(m, conn, s)
+				}(session, "LLM limits hit or service error, failing over to fallback processing", ws)
+
+				if fbProv == "ollama" {
+					return streamOllamaAndTTS(ctx, prompt, ws, session)
+				}
+				// If it's Gemini, we need the API key
+				session.Mutex.Lock()
+				apiKey := session.APIKey
+				session.Mutex.Unlock()
+				return streamGeminiAndTTS(ctx, prompt, ws, session, apiKey)
+			} else {
+				// Critical failure! No models left.
+				log.Printf("[Ollama] CRITICAL FAILURE: All model fallbacks exhausted for client %s", session.ClientID)
+				go injectSystemAudio("Sorry, theres a critical failure in the system, we can't currently access any of the LLM services. Please check back later.", ws, session)
+			}
+		}
+
 		session.Mutex.Lock()
 		t := session.ActiveThread()
 		if !strings.HasPrefix(prompt, "[") {
