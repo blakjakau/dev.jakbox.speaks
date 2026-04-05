@@ -455,6 +455,15 @@ func reloadConfig(path string) error {
 	piperNodes = newPiperNodes
 	piperNodesMutex.Unlock()
 
+	// Refresh all sessions' admin cache
+	activeSessionsMutex.Lock()
+	for _, s := range activeSessions {
+		s.Mutex.Lock()
+		s.RefreshAdminCache()
+		s.Mutex.Unlock()
+	}
+	activeSessionsMutex.Unlock()
+
 	return nil
 }
 
@@ -748,6 +757,26 @@ type ClientSession struct {
 	FallbackOriginalModel    string                 `json:"fallbackOriginalModel"`
 	PassiveBlockUntil        time.Time              `json:"-"`
 	Version                  int                    `json:"version"`
+	IsAdminCache             bool                   `json:"-"`
+}
+
+type SystemPromptData struct {
+	ClientID               string
+	UserName               string
+	GoogleName             string
+	EffectiveUserName      string
+	UserBio                string
+	IsAdmin                bool
+	SystemPromptGemini     string
+	SystemPromptOllama     string
+	Tools                  map[string]*Tool
+	ActiveThreadSummary    string
+	PinnedItems            map[string]*PinnedItem
+	SharedMemory           map[string]string
+	PersonaMemory          map[string]string
+	EffectiveAssistantName string
+	TargetPersonaName      string
+	PhoneticPersonaName    string
 }
 
 // ---- Config Resolvers ---------------------------------------------------
@@ -836,7 +865,73 @@ func IsAdminID(id string) bool {
 }
 
 func (s *ClientSession) IsAdmin() bool {
-	return IsAdminID(s.ClientID)
+	return s.IsAdminCache
+}
+
+func (s *ClientSession) RefreshAdminCache() {
+	s.IsAdminCache = IsAdminID(s.ClientID)
+}
+
+func (s *ClientSession) getSystemPromptData() *SystemPromptData {
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
+
+	t := s.ActiveThread()
+	
+	// Copy tools map for safety
+	toolsCopy := make(map[string]*Tool)
+	for k, v := range s.Tools {
+		toolsCopy[k] = v
+	}
+
+	// Copy pinned items map
+	pinnedCopy := make(map[string]*PinnedItem)
+	if t != nil {
+		for k, v := range t.PinnedItems {
+			pinnedCopy[k] = v
+		}
+	}
+
+	summary := ""
+	if t != nil {
+		summary = t.Summary
+	}
+
+	effName := s.UserName
+	if effName == "" {
+		effName = s.GoogleName
+	}
+
+	// Resolve persona info
+	voiceName := extractVoiceName(s.Voice)
+	personaNameLower := strings.ToLower(voiceName)
+	targetPName := strings.Title(voiceName)
+	phoneticPName := ""
+	
+	personasMutex.RLock()
+	if p, ok := personas[personaNameLower]; ok {
+		if p.Name != "" {
+			targetPName = p.Name
+		}
+		phoneticPName = p.PhoneticPronunciation
+	}
+	personasMutex.RUnlock()
+
+	return &SystemPromptData{
+		ClientID:            s.ClientID,
+		UserName:            s.UserName,
+		GoogleName:          s.GoogleName,
+		EffectiveUserName:   effName,
+		UserBio:             s.UserBio,
+		IsAdmin:             s.IsAdminCache,
+		SystemPromptGemini:  s.GetSystemPromptGemini(),
+		SystemPromptOllama:  s.GetSystemPromptOllama(),
+		Tools:               toolsCopy,
+		ActiveThreadSummary: summary,
+		PinnedItems:         pinnedCopy,
+		TargetPersonaName:   targetPName,
+		PhoneticPersonaName: phoneticPName,
+	}
 }
 
 func (s *ClientSession) isToolConn(ws *websocket.Conn) bool {
@@ -1525,32 +1620,51 @@ func getOrCreateSession(clientID string) *ClientSession {
 	if s.Tools == nil {
 		s.Tools = make(map[string]*Tool)
 	}
+	s.RefreshAdminCache()
 	activeSessions[clientID] = s
 	return s
 }
 
-func getMemoryPath(clientID string) string {
+func getMemoryPath(clientID string, personaName string) string {
+	dir := getContextDir(clientID)
+	if personaName == "" {
+		return filepath.Join(dir, "memory-shared.json")
+	}
+	return filepath.Join(dir, "memory-"+personaName+".json")
+}
+
+func getLegacySharedMemoryPath(clientID string) string {
 	return filepath.Join(getContextDir(clientID), "memory.json")
 }
 
-func getForgottenMemoryPath(clientID string) string {
-	return filepath.Join(getContextDir(clientID), "forgotten.json")
+func getForgottenMemoryPath(clientID string, personaName string) string {
+	dir := getContextDir(clientID)
+	if personaName == "" {
+		return filepath.Join(dir, "forgotten-shared.json")
+	}
+	return filepath.Join(dir, "forgotten-"+personaName+".json")
 }
 
-func loadLongTermMemory(clientID string) map[string]string {
-	memoryPath := getMemoryPath(clientID)
-	// Fallback for migration
-	safeID := strings.ReplaceAll(clientID, "/", "")
-	safeID = strings.ReplaceAll(safeID, "\\", "")
-	safeID = strings.ReplaceAll(safeID, "..", "")
-	oldPath := filepath.Join(".", "context", safeID+"-alyx.json")
+func loadMemory(clientID string, personaName string) map[string]string {
+	memoryPath := getMemoryPath(clientID, personaName)
 
+	// Lazy upgrade for shared memory: memory.json -> memory-shared.json
 	data, err := os.ReadFile(memoryPath)
-	if err != nil {
-		data, err = os.ReadFile(oldPath)
+	if err != nil && personaName == "" {
+		legacyPath := getLegacySharedMemoryPath(clientID)
+		data, err = os.ReadFile(legacyPath)
 		if err != nil {
-			return make(map[string]string)
+			// Fallback for older migration
+			safeID := strings.ReplaceAll(clientID, "/", "")
+			safeID = strings.ReplaceAll(safeID, "\\", "")
+			safeID = strings.ReplaceAll(safeID, "..", "")
+			oldPath := filepath.Join(".", "context", safeID+"-alyx.json")
+			data, err = os.ReadFile(oldPath)
 		}
+	}
+
+	if err != nil {
+		return make(map[string]string)
 	}
 
 	var memMap map[string]string
@@ -1568,27 +1682,34 @@ func loadLongTermMemory(clientID string) map[string]string {
 	return memMap
 }
 
-func saveLongTermMemory(clientID string, key string, content string) error {
-	memMap := loadLongTermMemory(clientID)
+func saveMemory(clientID string, personaName string, key string, content string) error {
+	memMap := loadMemory(clientID, personaName)
 	memMap[key] = content
 	data, err := json.MarshalIndent(memMap, "", "  ")
 	if err != nil {
 		return err
 	}
-	os.MkdirAll(filepath.Join(".", "context"), 0755)
 
-	// Migration cleanup: remove old file if it exists
-	safeID := strings.ReplaceAll(clientID, "/", "")
-	safeID = strings.ReplaceAll(safeID, "\\", "")
-	safeID = strings.ReplaceAll(safeID, "..", "")
-	oldPath := filepath.Join(".", "context", safeID+"-alyx.json")
-	os.Remove(oldPath)
+	memoryPath := getMemoryPath(clientID, personaName)
+	os.MkdirAll(filepath.Dir(memoryPath), 0755)
 
-	return os.WriteFile(getMemoryPath(clientID), data, 0644)
+	err = os.WriteFile(memoryPath, data, 0644)
+	if err == nil && personaName == "" {
+		// Migration cleanup: remove old file if it exists
+		legacyPath := getLegacySharedMemoryPath(clientID)
+		os.Remove(legacyPath)
+
+		safeID := strings.ReplaceAll(clientID, "/", "")
+		safeID = strings.ReplaceAll(safeID, "\\", "")
+		safeID = strings.ReplaceAll(safeID, "..", "")
+		oldPath := filepath.Join(".", "context", safeID+"-alyx.json")
+		os.Remove(oldPath)
+	}
+	return err
 }
 
-func deleteLongTermMemory(clientID string, key string) error {
-	memMap := loadLongTermMemory(clientID)
+func deleteMemory(clientID string, personaName string, key string) error {
+	memMap := loadMemory(clientID, personaName)
 	content, exists := memMap[key]
 	if !exists {
 		return fmt.Errorf("memory key '%s' not found", key)
@@ -1598,10 +1719,11 @@ func deleteLongTermMemory(clientID string, key string) error {
 
 	// Save updated memory
 	data, _ := json.MarshalIndent(memMap, "", "  ")
-	os.WriteFile(getMemoryPath(clientID), data, 0644)
+	memoryPath := getMemoryPath(clientID, personaName)
+	os.WriteFile(memoryPath, data, 0644)
 
-	// Append to forgotten.json
-	forgottenPath := getForgottenMemoryPath(clientID)
+	// Append to forgotten-[tier].json
+	forgottenPath := getForgottenMemoryPath(clientID, personaName)
 	var forgotten map[string][]map[string]string
 	fData, err := os.ReadFile(forgottenPath)
 	if err == nil {
@@ -1618,7 +1740,8 @@ func deleteLongTermMemory(clientID string, key string) error {
 	forgotten[key] = append(forgotten[key], entry)
 
 	fOut, _ := json.MarshalIndent(forgotten, "", "  ")
-	return os.WriteFile(forgottenPath, fOut, 0644)
+	os.WriteFile(forgottenPath, fOut, 0644)
+	return nil
 }
 
 func saveSession(session *ClientSession) {
@@ -2071,6 +2194,8 @@ func (s *ClientSession) getRateLimitUsageUnsafe(model string) (rpm, rpd int, tpm
 }
 
 func (s *ClientSession) getRateLimitStatus(model string) string {
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
 	rpm, rpd, tpm, limits, _ := s.getRateLimitUsageUnsafe(model)
 
 	// If no limits defined at all, return empty
@@ -2080,6 +2205,12 @@ func (s *ClientSession) getRateLimitStatus(model string) string {
 
 	return fmt.Sprintf("\n\n### Model Usage & Limits (%s)\n- Requests Per Minute: %d/%d\n- Tokens Per Minute: %d/%d used in last 60s\n- Requests Per Day: %d/%d since midnight PT",
 		model, rpm, limits.RPM, tpm, limits.TPM, rpd, limits.RPD)
+}
+
+func getRateLimitStatusData(data *SystemPromptData, model string) string {
+	// Re-lookup session to get fresh rate limits without holding the lock for long
+	s := getOrCreateSession(data.ClientID)
+	return s.getRateLimitStatus(model)
 }
 
 func (s *ClientSession) getRateLimitLogString(model string) string {
@@ -3131,11 +3262,11 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, text st
 func getInternalTools() []Tool {
 	return []Tool{
 		{
-			Name: "LongTermMemory",
+			Name: "SharedMemory",
 			Actions: []ToolAction{
 				{
 					Name:        "save",
-					Description: "Save a piece of info to long-term memory for future recall. Use for facts, preferences, or important life events mentioned by the user.",
+					Description: "Save a piece of info to shared long-term memory for future recall. Information stored here is accessible to all personas you adopt. Use for general facts about the user, their preferences, and global context.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -3147,7 +3278,35 @@ func getInternalTools() []Tool {
 				},
 				{
 					Name:        "delete",
-					Description: "Forget a piece of info from long-term memory. Use when information is corrected, updated, or no longer relevant.",
+					Description: "Forget a piece of info from shared memory. Use when information is corrected, updated, or no longer relevant.",
+					Schema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"key": map[string]interface{}{"type": "string", "description": "The exact key to forget"},
+						},
+						"required": []string{"key"},
+					},
+				},
+			},
+		},
+		{
+			Name: "PersonaMemory",
+			Actions: []ToolAction{
+				{
+					Name:        "save",
+					Description: "Save a piece of info to your private persona memory. Information stored here is isolated to your current persona. Use for persona-specific relationships, private observations, or specialized knowledge that shouldn't leak to other identities.",
+					Schema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"key":     map[string]interface{}{"type": "string", "description": "Short mnemonic key (e.g. 'our_secret')"},
+							"content": map[string]interface{}{"type": "string", "description": "The information to remember"},
+						},
+						"required": []string{"key", "content"},
+					},
+				},
+				{
+					Name:        "delete",
+					Description: "Forget a piece of info from your private persona memory.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -3409,18 +3568,28 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 	}
 
 
-	if toolName == "LongTermMemory" || sanitizeFunctionName("LongTermMemory") == toolName {
+	isShared := toolName == "SharedMemory" || sanitizeFunctionName("SharedMemory") == toolName
+	isPersona := toolName == "PersonaMemory" || sanitizeFunctionName("PersonaMemory") == toolName
+
+	if isShared || isPersona {
 		var err error
 		var statusMsg string
+
+		personaName := ""
+		if isPersona {
+			session.Mutex.Lock()
+			personaName = extractVoiceName(session.Voice)
+			session.Mutex.Unlock()
+		}
 
 		if actionName == "save" {
 			key, _ := args["key"].(string)
 			content, _ := args["content"].(string)
-			err = saveLongTermMemory(session.ClientID, key, content)
+			err = saveMemory(session.ClientID, personaName, key, content)
 			statusMsg = "Memory saved successfully."
 		} else if actionName == "delete" {
 			key, _ := args["key"].(string)
-			err = deleteLongTermMemory(session.ClientID, key)
+			err = deleteMemory(session.ClientID, personaName, key)
 			statusMsg = "Memory deleted successfully."
 		}
 
@@ -3674,9 +3843,15 @@ func getGeminiModelsInternal(apiKey string, isAdmin bool) []ModelData {
 }
 
 func getSystemStatusPrompt(session *ClientSession, provider string) string {
+	// Wrapper for backward compatibility (could be refactored away later)
+	data := session.getSystemPromptData()
+	return getSystemStatusPromptData(data, provider)
+}
+
+func getSystemStatusPromptData(data *SystemPromptData, provider string) string {
 	var sb strings.Builder
 
-	// 1. Whisper STT Nodes
+	// 1. STT Nodes
 	sttNodes := sttManager.GetStatus()
 	if len(sttNodes) > 0 {
 		sb.WriteString("\n\n### system status: Whisper STT Nodes\n")
@@ -3690,49 +3865,32 @@ func getSystemStatusPrompt(session *ClientSession, provider string) string {
 		}
 	}
 
-	// 2. Connected Users Monitor
+	// 2. Connected Users
 	activeSessionsMutex.Lock()
 	if len(activeSessions) > 0 {
 		sb.WriteString("\n### system status: Connected Users Monitor\n")
 		sb.WriteString(fmt.Sprintf("Active Sessions: %d\n", len(activeSessions)))
 		for id, sess := range activeSessions {
 			currentUser := ""
-			if id == session.ClientID {
+			if id == data.ClientID {
 				currentUser = " (YOU)"
 			}
 
-			name := "Unknown"
-			threadName := "(Initial Thread)"
-
-			// Note: The caller (prepareSystemPrompt's wrapper) already holds the lock for 'session'.
-			// We must not lock it again to avoid deadlocks. For other sessions, we lock normally.
-			if id == session.ClientID {
-				name = sess.UserName
-				if name == "" {
-					name = sess.GoogleName
-				}
-				if name == "" {
-					name = id
-				}
-				if t, ok := sess.Threads[sess.ActiveThreadID]; ok {
-					threadName = t.Name
-				}
-			} else {
-				sess.Mutex.Lock()
-				name = sess.UserName
-				if name == "" {
-					name = sess.GoogleName
-				}
-				if name == "" {
-					name = id
-				}
-				if t, ok := sess.Threads[sess.ActiveThreadID]; ok {
-					threadName = t.Name
-				}
-				sess.Mutex.Unlock()
+			sess.Mutex.Lock()
+			name := sess.UserName
+			if name == "" {
+				name = sess.GoogleName
+			}
+			if name == "" {
+				name = id
 			}
 
+			threadName := "(Initial Thread)"
+			if t, ok := sess.Threads[sess.ActiveThreadID]; ok && t.Name != "" {
+				threadName = t.Name
+			}
 			sb.WriteString(fmt.Sprintf("- %s%s (Active Thread: %s)\n", name, currentUser, threadName))
+			sess.Mutex.Unlock()
 		}
 	}
 	activeSessionsMutex.Unlock()
@@ -3740,12 +3898,12 @@ func getSystemStatusPrompt(session *ClientSession, provider string) string {
 	return sb.String()
 }
 
-func prepareSystemPrompt(session *ClientSession, model, voiceName, provider string) string {
+func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider string) string {
 	var basePrompt string
 	if provider == "gemini" {
-		basePrompt = session.GetSystemPromptGemini()
+		basePrompt = data.SystemPromptGemini
 	} else {
-		basePrompt = session.GetSystemPromptOllama()
+		basePrompt = data.SystemPromptOllama
 	}
 
 	// 1. Get persona
@@ -3758,6 +3916,7 @@ func prepareSystemPrompt(session *ClientSession, model, voiceName, provider stri
 	if hasPersona && p.Name != "" {
 		effectiveAssistantName = p.Name
 	}
+	data.EffectiveAssistantName = effectiveAssistantName // Store back for caller use
 
 	// 2. Format base with model and effective name
 	sysContent := fmt.Sprintf(basePrompt, model, effectiveAssistantName)
@@ -3775,25 +3934,27 @@ func prepareSystemPrompt(session *ClientSession, model, voiceName, provider stri
 
 	// 3. User details
 	roleStr := "user"
-	if session.IsAdmin() {
+	if data.IsAdmin {
 		roleStr = "admin"
 	}
 	sysContent += fmt.Sprintf("\n\n### User Information\n- user_system_role: %s", roleStr)
 
-	if session.UserName != "" {
-		sysContent += fmt.Sprintf("\n- name: %s", session.UserName)
-	} else if session.GoogleName != "" {
-		sysContent += fmt.Sprintf("\n- name: %s", session.GoogleName)
+	if data.UserName != "" {
+		sysContent += fmt.Sprintf("\n- name: %s", data.UserName)
+	} else if data.GoogleName != "" {
+		sysContent += fmt.Sprintf("\n- name: %s", data.GoogleName)
 	}
-	if session.UserBio != "" {
-		sysContent += fmt.Sprintf("\n- bio: %s", session.UserBio)
+	if data.UserBio != "" {
+		sysContent += fmt.Sprintf("\n- bio: %s", data.UserBio)
 	}
 
 	// 4. Metadata
 	currentTime := time.Now().Format("Monday, January 2, 2006, 15:04 MST")
 	sysContent += fmt.Sprintf("\n\nThe current date and time is: %s.", currentTime)
-	if session.IsAdmin() {
-		sysContent += getSystemStatusPrompt(session, provider)
+
+	// 5. System Status (Unlocked context)
+	if data.IsAdmin {
+		sysContent += getSystemStatusPromptData(data, provider)
 	}
 
 	// 6. Pinned Context Instructions
@@ -3804,16 +3965,7 @@ func prepareSystemPrompt(session *ClientSession, model, voiceName, provider stri
 	sysContent += "When an item is pinned, it appears in your history with a `[PINNED_ITEM_HEADER]` block. "
 	sysContent += "Status `ONLINE` implies the source tool is connected; `OFFLINE` means the tool is disconnected and content may be hidden or stale."
 
-	// 7. Long-term Memory
-	if memoryMap := loadLongTermMemory(session.ClientID); len(memoryMap) > 0 {
-		sysContent += "\n### Long-term Memory\n"
-		for k, v := range memoryMap {
-			sysContent += fmt.Sprintf("- %s: %s\n", k, v)
-		}
-	}
-
-	// 5b. Tool use directive — inject when tools are registered AND the model supports them
-	// NOTE: caller may hold session.Mutex, so we access session.Tools directly (consistent with rest of function)
+	// 5b. Tool support check
 	toolsSupported := true
 	if provider == "ollama" {
 		toolsSupported = ollamaModelSupportsTools(model)
@@ -3821,7 +3973,34 @@ func prepareSystemPrompt(session *ClientSession, model, voiceName, provider stri
 		toolsSupported = strings.Contains(strings.ToLower(model), "gemini")
 	}
 
-	if len(session.Tools) > 0 && toolsSupported {
+	// 7. Tiered Memory (Shared & Persona)
+	sharedMemory := data.SharedMemory
+	personaMemory := data.PersonaMemory
+
+	if len(sharedMemory) > 0 || len(personaMemory) > 0 {
+		sysContent += "\n\n### Long-term Memory"
+		if toolsSupported {
+			sysContent += "\nYou have access to two tiers of long-term memory:"
+			sysContent += "\n1. **Shared Memory**: Information stored here is accessible to all personas you adopt. Use this for general facts about the user, their preferences, and global context."
+			sysContent += "\n2. **Persona Memory**: Information stored here is isolated to your current persona. Use this for persona-specific relationships, private observations, or specialized knowledge that shouldn't leak to other identities."
+			sysContent += "\nWhen storing new information via tools, choose the most appropriate tier based on its relevance."
+		}
+
+		if len(sharedMemory) > 0 {
+			sysContent += "\n\n#### Shared Memory\n"
+			for k, v := range sharedMemory {
+				sysContent += fmt.Sprintf("- %s: %s\n", k, v)
+			}
+		}
+		if len(personaMemory) > 0 {
+			sysContent += fmt.Sprintf("\n\n#### Persona Memory (%s)\n", effectiveAssistantName)
+			for k, v := range personaMemory {
+				sysContent += fmt.Sprintf("- %s: %s\n", k, v)
+			}
+		}
+	}
+
+	if len(data.Tools) > 0 && toolsSupported {
 		configMutex.RLock()
 		toolDirective := config.ToolSystemPrompt
 		configMutex.RUnlock()
@@ -3831,13 +4010,12 @@ func prepareSystemPrompt(session *ClientSession, model, voiceName, provider stri
 	}
 
 	// 6. Thread Summary
-	t := session.ActiveThread()
-	if t.Summary != "" {
-		sysContent += "\n\nContext from earlier in the conversation: " + t.Summary
+	if data.ActiveThreadSummary != "" {
+		sysContent += "\n\nContext from earlier in the conversation: " + data.ActiveThreadSummary
 	}
 
 	// 7. Rate Limit Status (Inject at bottom for recency/visibility)
-	sysContent += session.getRateLimitStatus(model)
+	sysContent += getRateLimitStatusData(data, model)
 
 	return sysContent
 }
@@ -4219,17 +4397,18 @@ func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.C
 }
 
 func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession, apiKey string) error {
+	promptData := session.getSystemPromptData()
+	
+	// Hydrate heavy context items outside of session lock
+	promptData.SharedMemory = loadMemory(promptData.ClientID, "")
+	
 	session.Mutex.Lock()
 	model := session.Model
 	voice := session.Voice
 	configMutex.RLock()
 	defaultVoice := config.DefaultVoice
 	configMutex.RUnlock()
-
-	effectiveUserName := session.UserName
-	if effectiveUserName == "" {
-		effectiveUserName = session.GoogleName
-	}
+	session.Mutex.Unlock()
 
 	if model == "" {
 		model = "gemini-1.5-flash"
@@ -4238,9 +4417,14 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		voice = defaultVoice
 	}
 	voiceName := extractVoiceName(voice)
+	promptData.PersonaMemory = loadMemory(promptData.ClientID, voiceName)
 
-	sysContent := prepareSystemPrompt(session, model, voiceName, "gemini")
+	sysContent := prepareSystemPrompt(promptData, model, voiceName, "gemini")
 	saveCalculatedSystemPrompt(session, sysContent)
+
+	targetPersonaName := promptData.TargetPersonaName
+	phoneticPersonaName := promptData.PhoneticPersonaName
+	effectiveUserName := promptData.EffectiveUserName
 
 	// Resolve persona for output sanitisation
 	personaNameLower := strings.ToLower(voiceName)
@@ -4249,8 +4433,6 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	personasMutex.RUnlock()
 
 	var mutationRes []*regexp.Regexp
-	targetPersonaName := ""
-	phoneticPersonaName := ""
 	if hasPersona {
 		targetPersonaName = persona.Name
 		phoneticPersonaName = persona.PhoneticPronunciation
@@ -4263,6 +4445,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		}
 	}
 
+	session.Mutex.Lock()
 	t := session.ActiveThread()
 	// Native tools are only supported for official Gemini models; others (Gemma, Llama)
 	// get a redirected system prompt and no tool access to improve reliability.
@@ -4738,7 +4921,11 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 }
 
 func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
-	log.Printf("[Ollama] streamOllamaAndTTS entered — acquiring session mutex")
+	promptData := session.getSystemPromptData()
+	
+	// Hydrate heavy context items outside of session lock
+	promptData.SharedMemory = loadMemory(promptData.ClientID, "")
+
 	session.Mutex.Lock()
 	model := session.Model
 	voice := session.Voice
@@ -4746,11 +4933,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	ollamaModelConfig := config.OllamaModel
 	defaultVoiceConfig := config.DefaultVoice
 	configMutex.RUnlock()
-
-	effectiveUserName := session.UserName
-	if effectiveUserName == "" {
-		effectiveUserName = session.GoogleName
-	}
+	session.Mutex.Unlock()
 
 	if model == "" {
 		model = ollamaModelConfig
@@ -4759,10 +4942,16 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		voice = defaultVoiceConfig
 	}
 	voiceName := extractVoiceName(voice)
+	promptData.PersonaMemory = loadMemory(promptData.ClientID, voiceName)
 
-	sysContent := prepareSystemPrompt(session, model, voiceName, "ollama")
+	sysContent := prepareSystemPrompt(promptData, model, voiceName, "ollama")
 	saveCalculatedSystemPrompt(session, sysContent)
 
+	targetPersonaName := promptData.TargetPersonaName
+	phoneticPersonaName := promptData.PhoneticPersonaName
+	effectiveUserName := promptData.EffectiveUserName
+
+	session.Mutex.Lock()
 	t := session.ActiveThread()
 	ollamaSupportsTools := ollamaModelSupportsTools(model)
 	log.Printf("[LLM] Preparing context (Ollama Tool Support: %v)...", ollamaSupportsTools)
@@ -4772,6 +4961,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	log.Printf("[LLM] Formatting history (turns: %d)...", len(contextMsgs))
 	formattedHistory := prepareLLMHistory(contextMsgs, "ollama")
 	log.Printf("[LLM] Submitting to Ollama API model: %s...", model)
+	session.Mutex.Unlock()
 
 
 	var ollamaMsgs []map[string]interface{}
@@ -4807,7 +4997,6 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		"role":    "user",
 		"content": prompt,
 	})
-	session.Mutex.Unlock()
 
 	// Resolve persona for output sanitisation
 	voiceNameLower := strings.ToLower(voiceName)
@@ -4816,8 +5005,6 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	personasMutex.RUnlock()
 
 	var mutationRes []*regexp.Regexp
-	targetPersonaName := ""
-	phoneticPersonaName := ""
 	if hasPersona {
 		targetPersonaName = persona.Name
 		phoneticPersonaName = persona.PhoneticPronunciation
