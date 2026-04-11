@@ -21,7 +21,7 @@ Speax is a local-first, privacy-conscious AI voice router. Designed for low-late
 *   **TTS:** Piper TTS (Local) routing for audio synthesis
 
 ## Quick Start
-1.  **Server:** Ensure you have Go installed. Place your `google-client-secret.json` in the root. Run `go run server.go`.
+1.  **Server:** Ensure you have Go installed. Place your `google-client-secret.json` in the root. Run `go run .`.
 2.  **Web:** Serve the `./public` directory. Access on your local network (e.g., `https://<ip>:3000`).
 3.  **Android:** Open the `/android` directory in Android Studio and build to your device (or old-school CLI build, IDE's suck all the fun out of it)
 

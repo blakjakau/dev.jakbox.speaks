@@ -886,6 +886,8 @@ serverClient = new ServerClient(
             } else {
                 serverClient.sendRequestSync();
             }
+
+            initPush();
         },
         onClose: () => {
             status.innerText = "Status: Disconnected";
@@ -1665,5 +1667,53 @@ function stopRecording() {
         clearInterval(streamingInterval);
         streamingInterval = null;
     }
-    isStreaming = false;
+	isStreaming = false;
+}
+
+function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) {
+        outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+}
+
+async function initPush() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        console.warn('Push notifications are not supported in this browser.');
+        return;
+    }
+
+    try {
+        const registration = await navigator.serviceWorker.register('/sw.js');
+        const res = await fetch('/api/vapid-public-key');
+        const vapidPublicKey = await res.text();
+        
+        const subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(vapidPublicKey)
+        });
+
+        if (serverClient && serverClient.isOpen()) {
+            serverClient.send(`[REGISTER_VAPID_SUB]:${JSON.stringify(subscription)}`);
+        }
+    } catch (err) {
+        console.error('Failed to subscribe to push notifications:', err);
+    }
+}
+
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', event => {
+        if (event.data.type === 'NAVIGATE') {
+            const url = new URL(event.data.url, window.location.origin);
+            const threadId = url.searchParams.get('threadId');
+            if (threadId && serverClient && serverClient.isOpen()) {
+                serverClient.sendSwitchThread(threadId);
+                switchTab(threadTabBtn, transcript);
+            }
+        }
+    });
 }

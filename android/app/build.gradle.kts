@@ -1,14 +1,15 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
 }
 
 android {
-    namespace = "com.jakbox.speax"
+    namespace = "dev.jakbox.speax"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.jakbox.speax"
+        applicationId = "dev.jakbox.speax"
         minSdk = 26 // Android 8.0 minimum (good for Audio APIs)
         targetSdk = 34
         versionCode = 1
@@ -62,4 +63,8 @@ dependencies {
 
     // Sherpa-ONNX for native in-memory Piper TTS
     implementation(files("libs/sherpa-onnx-1.12.29.aar"))
+
+    // Firebase for Push Notifications
+    implementation(platform("com.google.firebase:firebase-bom:32.7.2"))
+    implementation("com.google.firebase:firebase-messaging-ktx")
 }

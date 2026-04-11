@@ -406,19 +406,19 @@ aaudio_data_callback_result_t dataCallback(
 // --- JNI Exports ---
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_create(JNIEnv* env, jobject obj) {
+Java_dev_jakbox_speax_NativeAudioEngine_create(JNIEnv* env, jobject obj) {
     LOGD("NativeAudioEngine: Created");
     return (jlong)new AudioEngineContext(env, obj);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_destroy(JNIEnv* env, jobject obj, jlong ptr) {
+Java_dev_jakbox_speax_NativeAudioEngine_destroy(JNIEnv* env, jobject obj, jlong ptr) {
     LOGD("NativeAudioEngine: Destroyed");
     delete (AudioEngineContext*)ptr;
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_startRecording(JNIEnv* env, jobject obj, jlong ptr) {
+Java_dev_jakbox_speax_NativeAudioEngine_startRecording(JNIEnv* env, jobject obj, jlong ptr) {
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     std::lock_guard<std::mutex> lock(ctx->engineMutex);
     LOGD("NativeAudioEngine: Starting recording");
@@ -485,7 +485,7 @@ Java_com_jakbox_speax_NativeAudioEngine_startRecording(JNIEnv* env, jobject obj,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_stopRecording(JNIEnv* env, jobject obj, jlong ptr) {
+Java_dev_jakbox_speax_NativeAudioEngine_stopRecording(JNIEnv* env, jobject obj, jlong ptr) {
     LOGD("NativeAudioEngine: stopRecording called (Closing hardware handle)");
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     std::lock_guard<std::mutex> lock(ctx->engineMutex);
@@ -509,7 +509,7 @@ Java_com_jakbox_speax_NativeAudioEngine_stopRecording(JNIEnv* env, jobject obj, 
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_forceEndStreaming(JNIEnv* env, jobject obj, jlong ptr) {
+Java_dev_jakbox_speax_NativeAudioEngine_forceEndStreaming(JNIEnv* env, jobject obj, jlong ptr) {
     LOGD("NativeAudioEngine: forceEndStreaming called");
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     std::lock_guard<std::mutex> lock(ctx->engineMutex);
@@ -534,7 +534,7 @@ Java_com_jakbox_speax_NativeAudioEngine_forceEndStreaming(JNIEnv* env, jobject o
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_setMicProfile(JNIEnv* env, jobject obj, jlong ptr, jstring profile) {
+Java_dev_jakbox_speax_NativeAudioEngine_setMicProfile(JNIEnv* env, jobject obj, jlong ptr, jstring profile) {
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     const char* nativeProfile = env->GetStringUTFChars(profile, nullptr);
     ctx->vad.setMicProfile(nativeProfile);
@@ -542,7 +542,7 @@ Java_com_jakbox_speax_NativeAudioEngine_setMicProfile(JNIEnv* env, jobject obj, 
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_setMuted(JNIEnv* env, jobject obj, jlong ptr, jboolean muted) {
+Java_dev_jakbox_speax_NativeAudioEngine_setMuted(JNIEnv* env, jobject obj, jlong ptr, jboolean muted) {
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     ctx->isMuted = muted;
     if (muted) {
@@ -553,13 +553,13 @@ Java_com_jakbox_speax_NativeAudioEngine_setMuted(JNIEnv* env, jobject obj, jlong
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_setThreshold(JNIEnv* env, jobject obj, jlong ptr, jdouble threshold) {
+Java_dev_jakbox_speax_NativeAudioEngine_setThreshold(JNIEnv* env, jobject obj, jlong ptr, jdouble threshold) {
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     ctx->vad.setThreshold(threshold);
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_jakbox_speax_NativeAudioEngine_setPlaybackActive(JNIEnv* env, jobject obj, jlong ptr, jboolean active) {
+Java_dev_jakbox_speax_NativeAudioEngine_setPlaybackActive(JNIEnv* env, jobject obj, jlong ptr, jboolean active) {
     AudioEngineContext* ctx = (AudioEngineContext*)ptr;
     ctx->vad.setPlaybackActive(active);
 }

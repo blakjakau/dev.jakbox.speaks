@@ -55,7 +55,6 @@ func getSortedKeys(m map[string]*Tool) []string {
 	return keys
 }
 
-
 type FallbackLLMConfig struct {
 	URL    string   `json:"URL"`
 	Models []string `json:"Models"`
@@ -74,32 +73,32 @@ type AdminConfigOverride struct {
 }
 
 type Config struct {
-	STTServers            []string                  `json:"STTServers"`
-	TTSServers            []string                  `json:"TTSServers"`
-	PiperBin              string                    `json:"PiperBin"`
-	DefaultVoice          string                    `json:"DefaultVoice"`
-	SampleRate            int                       `json:"SampleRate"`
-	OllamaURLs            []string                  `json:"OllamaURLs"`
-	OllamaChatURL         []string                  `json:"OllamaChatURL"`
-	OllamaModel           string                    `json:"OllamaModel"`
-	WakeWords             []string                  `json:"WakeWords"`
-	PassiveWindowSeconds  int                       `json:"PassiveWindowSeconds"`
-	MaxArchiveTurns       int                       `json:"MaxArchiveTurns"`
-	MaxTokensGemini       int                       `json:"MaxTokensGemini"`
-	MaxTokensOllama       int                       `json:"MaxTokensOllama"`
-	SystemPromptGemini    string                    `json:"SystemPromptGemini"`
-	SystemPromptOllama    string                    `json:"SystemPromptOllama"`
-	ToolSystemPrompt      string                    `json:"ToolSystemPrompt"`
-	Admins                map[string]AdminConfigOverride `json:"Admins"`
-	ModelLimits           map[string]ModelRateLimit `json:"ModelLimits"`
-	DefaultLimit          ModelRateLimit            `json:"DefaultLimit"`
-	FallbackLLM           FallbackLLMConfig         `json:"FallbackLLM"`
-	GeminiModels          []string                  `json:"GeminiModels"`
-	OllamaModels          []string                  `json:"OllamaModels"`
-	STTMinBuffer          float64                   `json:"STTMinBuffer"`
-	STTMaxBuffer          float64                   `json:"STTMaxBuffer"`
-	STTEnergyThreshold    float64                  `json:"STTEnergyThreshold"`
-	VerboseLogging         bool                     `json:"VerboseLogging"`
+	STTServers           []string                       `json:"STTServers"`
+	TTSServers           []string                       `json:"TTSServers"`
+	PiperBin             string                         `json:"PiperBin"`
+	DefaultVoice         string                         `json:"DefaultVoice"`
+	SampleRate           int                            `json:"SampleRate"`
+	OllamaURLs           []string                       `json:"OllamaURLs"`
+	OllamaChatURL        []string                       `json:"OllamaChatURL"`
+	OllamaModel          string                         `json:"OllamaModel"`
+	WakeWords            []string                       `json:"WakeWords"`
+	PassiveWindowSeconds int                            `json:"PassiveWindowSeconds"`
+	MaxArchiveTurns      int                            `json:"MaxArchiveTurns"`
+	MaxTokensGemini      int                            `json:"MaxTokensGemini"`
+	MaxTokensOllama      int                            `json:"MaxTokensOllama"`
+	SystemPromptGemini   string                         `json:"SystemPromptGemini"`
+	SystemPromptOllama   string                         `json:"SystemPromptOllama"`
+	ToolSystemPrompt     string                         `json:"ToolSystemPrompt"`
+	Admins               map[string]AdminConfigOverride `json:"Admins"`
+	ModelLimits          map[string]ModelRateLimit      `json:"ModelLimits"`
+	DefaultLimit         ModelRateLimit                 `json:"DefaultLimit"`
+	FallbackLLM          FallbackLLMConfig              `json:"FallbackLLM"`
+	GeminiModels         []string                       `json:"GeminiModels"`
+	OllamaModels         []string                       `json:"OllamaModels"`
+	STTMinBuffer         float64                        `json:"STTMinBuffer"`
+	STTMaxBuffer         float64                        `json:"STTMaxBuffer"`
+	STTEnergyThreshold   float64                        `json:"STTEnergyThreshold"`
+	VerboseLogging       bool                           `json:"VerboseLogging"`
 }
 
 type ModelRateLimit struct {
@@ -452,7 +451,7 @@ func reloadConfig(path string) error {
 	for _, node := range ttsNodes {
 		existingTTSNodes[node.URL] = node
 	}
-	
+
 	allTTSServers := append([]string{}, newConfig.TTSServers...)
 	seenTTS := make(map[string]bool)
 	for _, u := range allTTSServers {
@@ -589,10 +588,10 @@ type Persona struct {
 	InteractionStyle      string       `json:"interaction_style"`
 	Constraints           string       `json:"constraints"`
 	VoiceFile             string       `json:"voice_file"`
-	VoiceNoiseScale      float64      `json:"voice_noise_scale,omitempty"`
-	VoiceLengthScale     float64      `json:"voice_length_scale,omitempty"`
-	VoiceNoiseW          float64      `json:"voice_noise_w,omitempty"`
-	VoiceVariance        float64      `json:"voice_variance,omitempty"`
+	VoiceNoiseScale       float64      `json:"voice_noise_scale,omitempty"`
+	VoiceLengthScale      float64      `json:"voice_length_scale,omitempty"`
+	VoiceNoiseW           float64      `json:"voice_noise_w,omitempty"`
+	VoiceVariance         float64      `json:"voice_variance,omitempty"`
 	Theme                 PersonaTheme `json:"theme"`
 }
 
@@ -690,6 +689,21 @@ type ChatMessage struct {
 	ToolResult *NativeToolResult `json:"tool_result,omitempty"`
 }
 
+type Timer struct {
+	ID          string    `json:"id"`
+	TriggerTime time.Time `json:"triggerTime"`
+	Label       string    `json:"label"`
+	ThreadID    string    `json:"threadId"`
+	Expired     bool      `json:"expired"`
+	Missed      bool      `json:"missed"`
+}
+
+type MemoryEntry struct {
+	Content string `json:"memory"`
+	Created int64  `json:"created"`
+	Updated int64  `json:"updated"`
+}
+
 type PinnedItemHeader struct {
 	Source      string `json:"source"`
 	Identifier  string `json:"identifier"`
@@ -716,9 +730,6 @@ type Thread struct {
 	UpdatedAt   time.Time              `json:"updatedAt"`
 }
 
-
-
-
 type ToolAction struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
@@ -744,7 +755,6 @@ type ClientSession struct {
 	SystemLog      []ChatMessage      `json:"systemLog"`
 	IsAssistant    bool               `json:"isAssistant"`
 
-
 	// Legacy fields (kept for automatic migration on load)
 	History []ChatMessage `json:"history,omitempty"`
 	Archive []ChatMessage `json:"archive,omitempty"`
@@ -766,23 +776,25 @@ type ClientSession struct {
 	Conns         map[*websocket.Conn]ConnMeta `json:"-"`
 	Tools         map[string]*Tool             `json:"-"` // Map tool name to connected tool
 	// Streaming Audio State
-	StreamingBuffer    []byte                 `json:"-"`
-	StreamingStartTime time.Time              `json:"-"`
-	ActiveSeqID        int64                  `json:"-"`
-	BufferMutex        sync.Mutex             `json:"-"`
-	TurnMutex          sync.Mutex             `json:"-"` // Serializes AI responses/turns
-	STTStreams         map[int64]*stt.StreamSession `json:"-"`
-	ActiveCancel       context.CancelFunc     `json:"-"` // Global interrupt control
-	ToolDebounceTimer  *time.Timer            `json:"-"` // Debounces AI response after tool results
-	PassiveAssistant   bool                   `json:"passiveAssistant"`
-	LastActiveTime     time.Time              `json:"-"`
-	LastActiveConn     *websocket.Conn        `json:"-"` // Tracks the last client to send input (text/audio)
-	ModelUsage               map[string]*ModelUsage `json:"modelUsage"` // Per-model usage stats (pruned)
-	FallbackOriginalProvider string                 `json:"fallbackOriginalProvider"`
-	FallbackOriginalModel    string                 `json:"fallbackOriginalModel"`
-	PassiveBlockUntil        time.Time              `json:"-"`
-	Version                  int                    `json:"version"`
-	IsAdminCache             bool                   `json:"-"`
+	StreamingBuffer          []byte                       `json:"-"`
+	StreamingStartTime       time.Time                    `json:"-"`
+	ActiveSeqID              int64                        `json:"-"`
+	BufferMutex              sync.Mutex                   `json:"-"`
+	TurnMutex                sync.Mutex                   `json:"-"` // Serializes AI responses/turns
+	STTStreams               map[int64]*stt.StreamSession `json:"-"`
+	ActiveCancel             context.CancelFunc           `json:"-"` // Global interrupt control
+	ToolDebounceTimer        *time.Timer                  `json:"-"` // Debounces AI response after tool results
+	PassiveAssistant         bool                         `json:"passiveAssistant"`
+	LastActiveTime           time.Time                    `json:"-"`
+	LastActiveConn           *websocket.Conn              `json:"-"`          // Tracks the last client to send input (text/audio)
+	ModelUsage               map[string]*ModelUsage       `json:"modelUsage"` // Per-model usage stats (pruned)
+	FallbackOriginalProvider string                       `json:"fallbackOriginalProvider"`
+	FallbackOriginalModel    string                       `json:"fallbackOriginalModel"`
+	PassiveBlockUntil        time.Time                    `json:"-"`
+	Version                  int                          `json:"version"`
+	IsAdminCache             bool                         `json:"-"`
+	FCMToken                 string                       `json:"fcmToken,omitempty"`
+	VapidSub                 string                       `json:"vapidSub,omitempty"` // JSON stringified VapidSubscription
 }
 
 type SystemPromptData struct {
@@ -797,8 +809,8 @@ type SystemPromptData struct {
 	Tools                  map[string]*Tool
 	ActiveThreadSummary    string
 	PinnedItems            map[string]*PinnedItem
-	SharedMemory           map[string]string
-	PersonaMemory          map[string]string
+	SharedMemory           map[string]MemoryEntry
+	PersonaMemory          map[string]MemoryEntry
 	EffectiveAssistantName string
 	TargetPersonaName      string
 	PhoneticPersonaName    string
@@ -935,7 +947,7 @@ func (s *ClientSession) getSystemPromptData() *SystemPromptData {
 	defer s.Mutex.Unlock()
 
 	t := s.ActiveThread()
-	
+
 	// Copy tools map for safety
 	toolsCopy := make(map[string]*Tool)
 	for k, v := range s.Tools {
@@ -965,7 +977,7 @@ func (s *ClientSession) getSystemPromptData() *SystemPromptData {
 	personaNameLower := strings.ToLower(voiceName)
 	targetPName := strings.Title(voiceName)
 	phoneticPName := ""
-	
+
 	personasMutex.RLock()
 	if p, ok := personas[personaNameLower]; ok {
 		if p.Name != "" {
@@ -1033,7 +1045,6 @@ func (s *ClientSession) appendMessage(role, content string, thread *Thread) {
 	thread.UpdatedAt = msg.Timestamp
 }
 
-
 func (s *ClientSession) appendNativeToolCall(nativeName string, args map[string]interface{}, thread *Thread) string {
 	id := generateID()
 	msg := ChatMessage{
@@ -1082,7 +1093,6 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 		}
 		ctxMsgs = append(ctxMsgs, s.SystemLog[startIdx:]...)
 	}
-
 
 	// 2. Map results by ID for deterministic matching.
 	resultsByID := make(map[string]ChatMessage)
@@ -1147,7 +1157,23 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 		return ctxMsgs[i].Timestamp.Before(ctxMsgs[j].Timestamp)
 	})
 
-	// 7. Ensure role alternation and that we start with 'user'.
+	// 7. Inject Time Awareness: Precede each user turn with a system notice of the current time
+	// (read from the user turn record).
+	var ctxWithTime []ChatMessage
+	for _, m := range ctxMsgs {
+		if m.Role == "user" && m.ToolCall == nil && m.ToolResult == nil {
+			timeNotice := ChatMessage{
+				Role:      "system",
+				Content:   fmt.Sprintf("[System Note: Current Time] %s", m.Timestamp.Format("2006-01-02 15:04:05")),
+				Timestamp: m.Timestamp.Add(-1 * time.Microsecond),
+			}
+			ctxWithTime = append(ctxWithTime, timeNotice)
+		}
+		ctxWithTime = append(ctxWithTime, m)
+	}
+	ctxMsgs = ctxWithTime
+
+	// 8. Ensure role alternation and that we start with 'user'.
 	// Gemini is extremely strict about the first role being 'user' and roles alternating.
 	var finalized []ChatMessage
 	var systemBuffer []ChatMessage
@@ -1294,7 +1320,6 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	log.Printf("[RUMBLE] Ignored prompt in Passive Mode (Start: %v): '%s'", baseTime.Format("15:04:05.000"), prompt)
 	return false
 }
-
 
 // handleSystemTranscription checks for special system instructions and records them as system turns
 func handleSystemTranscription(session *ClientSession, text string, ws *websocket.Conn) bool {
@@ -1509,7 +1534,6 @@ func generateThreadTopic(prompt string) string {
 	return topic
 }
 
-
 func sanitizeTitle(title string) string {
 	reg, _ := regexp.Compile("[^a-zA-Z0-9]+")
 	sanitized := reg.ReplaceAllString(title, "")
@@ -1537,7 +1561,6 @@ func getUniqueThreadName(threads map[string]*Thread, name string, currentID stri
 		counter++
 	}
 }
-
 
 func loadSession(clientID string) *ClientSession {
 	session := &ClientSession{ClientID: clientID, Threads: make(map[string]*Thread)}
@@ -1611,7 +1634,6 @@ func loadSession(clientID string) *ClientSession {
 	loadFromDir(ctxDir)
 	loadFromDir(filepath.Join(ctxDir, "assistant"))
 
-
 	// Seamless migration of legacy flat structure into Thread structure
 	if len(session.Threads) == 0 {
 		t := &Thread{
@@ -1622,8 +1644,6 @@ func loadSession(clientID string) *ClientSession {
 			CreatedAt:   time.Now(),
 			UpdatedAt:   time.Now(),
 		}
-
-
 
 		session.Threads["default"] = t
 		session.ActiveThreadID = "default"
@@ -1701,7 +1721,7 @@ func getForgottenMemoryPath(clientID string, personaName string) string {
 	return filepath.Join(dir, "forgotten-"+personaName+".json")
 }
 
-func loadMemory(clientID string, personaName string) map[string]string {
+func loadMemory(clientID string, personaName string) map[string]MemoryEntry {
 	memoryPath := getMemoryPath(clientID, personaName)
 
 	// Lazy upgrade for shared memory: memory.json -> memory-shared.json
@@ -1720,19 +1740,40 @@ func loadMemory(clientID string, personaName string) map[string]string {
 	}
 
 	if err != nil {
-		return make(map[string]string)
+		return make(map[string]MemoryEntry)
 	}
 
-	var memMap map[string]string
+	var memMap map[string]MemoryEntry
 	if err := json.Unmarshal(data, &memMap); err != nil {
-		// Try legacy single-string format
-		var oldStruct struct {
-			Memory string `json:"memory"`
-		}
-		if err := json.Unmarshal(data, &oldStruct); err == nil && oldStruct.Memory != "" {
-			memMap = map[string]string{"legacy_memory": oldStruct.Memory}
+		// Try legacy format map[string]string
+		var legacyMap map[string]string
+		if err := json.Unmarshal(data, &legacyMap); err == nil {
+			memMap = make(map[string]MemoryEntry)
+			now := time.Now().Unix()
+			for k, v := range legacyMap {
+				memMap[k] = MemoryEntry{
+					Content: v,
+					Created: now,
+					Updated: now,
+				}
+			}
 		} else {
-			return make(map[string]string)
+			// Try legacy single-string format
+			var oldStruct struct {
+				Memory string `json:"memory"`
+			}
+			if err := json.Unmarshal(data, &oldStruct); err == nil && oldStruct.Memory != "" {
+				now := time.Now().Unix()
+				memMap = map[string]MemoryEntry{
+					"legacy_memory": {
+						Content: oldStruct.Memory,
+						Created: now,
+						Updated: now,
+					},
+				}
+			} else {
+				return make(map[string]MemoryEntry)
+			}
 		}
 	}
 	return memMap
@@ -1740,7 +1781,21 @@ func loadMemory(clientID string, personaName string) map[string]string {
 
 func saveMemory(clientID string, personaName string, key string, content string) error {
 	memMap := loadMemory(clientID, personaName)
-	memMap[key] = content
+
+	now := time.Now().Unix()
+	entry, exists := memMap[key]
+	if !exists {
+		entry = MemoryEntry{
+			Content: content,
+			Created: now,
+			Updated: now,
+		}
+	} else {
+		entry.Content = content
+		entry.Updated = now
+	}
+	memMap[key] = entry
+
 	data, err := json.MarshalIndent(memMap, "", "  ")
 	if err != nil {
 		return err
@@ -1766,7 +1821,7 @@ func saveMemory(clientID string, personaName string, key string, content string)
 
 func deleteMemory(clientID string, personaName string, key string) error {
 	memMap := loadMemory(clientID, personaName)
-	content, exists := memMap[key]
+	entry, exists := memMap[key]
 	if !exists {
 		return fmt.Errorf("memory key '%s' not found", key)
 	}
@@ -1780,24 +1835,97 @@ func deleteMemory(clientID string, personaName string, key string) error {
 
 	// Append to forgotten-[tier].json
 	forgottenPath := getForgottenMemoryPath(clientID, personaName)
-	var forgotten map[string][]map[string]string
+	var forgotten map[string][]map[string]interface{}
 	fData, err := os.ReadFile(forgottenPath)
 	if err == nil {
 		json.Unmarshal(fData, &forgotten)
 	}
 	if forgotten == nil {
-		forgotten = make(map[string][]map[string]string)
+		forgotten = make(map[string][]map[string]interface{})
 	}
 
-	entry := map[string]string{
-		"content":      content,
+	fEntry := map[string]interface{}{
+		"content":      entry.Content,
+		"created":      entry.Created,
+		"updated":      entry.Updated,
+		"key":          key,
+		"when":         time.Now().Unix(),
 		"forgotten_at": time.Now().Format(time.RFC3339),
 	}
-	forgotten[key] = append(forgotten[key], entry)
+	forgotten[key] = append(forgotten[key], fEntry)
 
 	fOut, _ := json.MarshalIndent(forgotten, "", "  ")
 	os.WriteFile(forgottenPath, fOut, 0644)
 	return nil
+}
+
+func (s *ClientSession) HasPush() bool {
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
+	return s.FCMToken != "" || s.VapidSub != ""
+}
+
+func (s *ClientSession) generateShortAssistantMessage(innerPrompt string) string {
+	s.Mutex.Lock()
+	provider := s.Provider
+	apiKey := s.APIKey
+	model := s.Model
+	s.Mutex.Unlock()
+
+	sysPrompt := "You are a helpful assistant. Generate a very brief (max 12 words) notification message to the user."
+	fullPrompt := fmt.Sprintf("[SYSTEM: %s]\n\n%s", sysPrompt, innerPrompt)
+
+	// Try Ollama first
+	configMutex.RLock()
+	ollamaModelConfig := config.OllamaModel
+	ollamaURLs := config.OllamaURLs
+	configMutex.RUnlock()
+
+	localPayload := map[string]interface{}{"model": ollamaModelConfig, "prompt": fullPrompt, "stream": false}
+	localBody, _ := json.Marshal(localPayload)
+	client := &http.Client{Timeout: 10 * time.Second}
+	url := getNextURL(ollamaURLs, &ollamaIndex)
+
+	if resp, err := client.Post(url, "application/json", bytes.NewReader(localBody)); err == nil {
+		defer resp.Body.Close()
+		var result struct {
+			Response string `json:"response"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&result) == nil {
+			return strings.Trim(strings.TrimSpace(result.Response), "\"")
+		}
+	}
+
+	// Fallback to Gemini
+	if provider == "gemini" && apiKey != "" {
+		if model == "" {
+			model = "gemini-1.5-flash"
+		}
+		payload := map[string]interface{}{
+			"contents": []map[string]interface{}{
+				{"role": "user", "parts": []map[string]string{{"text": fullPrompt}}},
+			},
+		}
+		body, _ := json.Marshal(payload)
+		reqURL := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, apiKey)
+		if resp, err := http.Post(reqURL, "application/json", bytes.NewReader(body)); err == nil {
+			defer resp.Body.Close()
+			var result struct {
+				Candidates []struct {
+					Content struct {
+						Parts []struct {
+							Text string `json:"text"`
+						} `json:"parts"`
+					} `json:"content"`
+				} `json:"candidates"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
+				return strings.Trim(strings.TrimSpace(result.Candidates[0].Content.Parts[0].Text), "\"")
+			}
+		}
+	}
+
+	return ""
 }
 
 func saveSession(session *ClientSession) {
@@ -1904,6 +2032,9 @@ func saveSession(session *ClientSession) {
 	session.SystemLog = originalSystemLog
 
 	// Cleanup old thread files (including in assistant/ subfolder)
+	activeFiles["timers.json"] = true
+	activeFiles["memory-shared.json"] = true
+
 	cleanupDir := func(dir string, prefix string) {
 		if entries, err := os.ReadDir(dir); err == nil {
 			for _, entry := range entries {
@@ -1912,6 +2043,10 @@ func saveSession(session *ClientSession) {
 				}
 				fullRel := filepath.Join(prefix, entry.Name())
 				if !activeFiles[fullRel] && strings.HasSuffix(entry.Name(), ".json") {
+					// Don't delete memory files or timers
+					if strings.HasPrefix(entry.Name(), "memory-") || entry.Name() == "timers.json" {
+						continue
+					}
 					os.Remove(filepath.Join(dir, entry.Name()))
 				}
 			}
@@ -1920,7 +2055,6 @@ func saveSession(session *ClientSession) {
 	cleanupDir(ctxDir, "")
 	cleanupDir(filepath.Join(ctxDir, "assistant"), "assistant")
 }
-
 
 func trackTokens(session *ClientSession, key string, tokens int64) {
 	if tokens <= 0 {
@@ -2418,6 +2552,13 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		session.appendMessage("system", connectMsg, session.ActiveThread())
 		session.Mutex.Unlock()
 		saveSession(session)
+
+		// Check for missed timers
+		go func() {
+			// Sleep briefly to ensure the client is ready to receive messages/audio
+			time.Sleep(2 * time.Second)
+			checkMissedTimers(session, ws)
+		}()
 	}
 
 	defer func() {
@@ -2615,8 +2756,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						go asyncUpdatePinnedItems(session, result.ToolName)
 					}
 
-
-
 					// Auto-trigger the AI to analyze the result and respond (DEBOUNCED)
 					session.Mutex.Lock()
 					if session.ToolDebounceTimer != nil {
@@ -2690,7 +2829,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-
 			if strings.HasPrefix(text, "[SWITCH_THREAD]:") {
 				id := strings.TrimPrefix(text, "[SWITCH_THREAD]:")
 				session.Mutex.Lock()
@@ -2720,7 +2858,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				sendThreads(nil, session)
 				continue
 			}
-
 
 			if strings.HasPrefix(text, "[DELETE_THREAD]:") {
 				id := strings.TrimPrefix(text, "[DELETE_THREAD]:")
@@ -2777,8 +2914,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[Assistant] Session IsAssistant sticky flag set to: %v", isAssistant)
 				continue
 			}
-
-
 
 			if strings.HasPrefix(text, "[SETTINGS]") {
 
@@ -2842,6 +2977,26 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						sendSettings(nil, session)
 					}
 				}
+				continue
+			}
+
+			if strings.HasPrefix(text, "[REGISTER_FCM_TOKEN]:") {
+				token := strings.TrimPrefix(text, "[REGISTER_FCM_TOKEN]:")
+				session.Mutex.Lock()
+				session.FCMToken = token
+				session.Mutex.Unlock()
+				saveSession(session)
+				log.Printf("[Push] Registered FCM token for %s", session.ClientID)
+				continue
+			}
+
+			if strings.HasPrefix(text, "[REGISTER_VAPID_SUB]:") {
+				sub := strings.TrimPrefix(text, "[REGISTER_VAPID_SUB]:")
+				session.Mutex.Lock()
+				session.VapidSub = sub
+				session.Mutex.Unlock()
+				saveSession(session)
+				log.Printf("[Push] Registered VAPID sub for %s", session.ClientID)
 				continue
 			}
 
@@ -2934,8 +3089,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 							}
 							session.Mutex.Unlock()
 						}
-
-
 
 						go func(p string, bt time.Time) {
 							session.Mutex.Lock()
@@ -3216,13 +3369,13 @@ func handleStreamingAudio(ws *websocket.Conn, session *ClientSession, p []byte) 
 		} else if packetType == 0x02 { // END
 			// Final synchronous wrap-up to ensure the tail is processed
 			fullTranscript := stream.Finish()
-			
+
 			log.Printf("[STT-Stream-v1] Finalizing sequence %d", seqID)
-			
+
 			// Use the format: "[STT-Live] Final Transcription (35 words transcribed) sequence %d: 'initial ... last'"
 			wordCount := len(strings.Fields(fullTranscript))
 			log.Printf("[STT-Live] Final Transcription (%d words transcribed) sequence %d: '%s'", wordCount, seqID, formatTranscriptSummary(fullTranscript))
-			
+
 			// Clean up
 			delete(session.STTStreams, int64(seqID))
 
@@ -3307,7 +3460,6 @@ func processStreamingWhisper(ws *websocket.Conn, session *ClientSession, text st
 	}
 }
 
-
 // buildToolSystemPrompt generates the JSON schema block for connected tools to inject into the LLM prompt.
 func getInternalTools() []Tool {
 	return []Tool{
@@ -3316,12 +3468,12 @@ func getInternalTools() []Tool {
 			Actions: []ToolAction{
 				{
 					Name:        "save",
-					Description: "Save a piece of info to shared long-term memory for future recall. Information stored here is accessible to all personas you adopt. Use for general facts about the user, their preferences, and global context.",
+					Description: "Manage global context and user preferences accessible across all personas. [AUTONOMOUS_POLICY]: Proactively identify and save key facts/decisions without requiring explicit commands. [DIRECTIVES]: 1. Prioritize high-density facts over conversational noise. 2. Periodically prune obsolete/redundant entries. 3. Merge related items to maintain efficiency. 4. Briefly notify user of significant updates in your current persona's style. [SYSTEM NOTE]: Timestamps (created/updated) are automatically managed by the system. Do NOT include timestamps in the key or content fields.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"key":     map[string]interface{}{"type": "string", "description": "Short mnemonic key (e.g. 'user_birthday')"},
-							"content": map[string]interface{}{"type": "string", "description": "The information to remember"},
+							"key":     map[string]interface{}{"type": "string", "description": "Short mnemonic key (e.g. 'user_birthday')."},
+							"content": map[string]interface{}{"type": "string", "description": "The information to remember."},
 						},
 						"required": []string{"key", "content"},
 					},
@@ -3344,12 +3496,12 @@ func getInternalTools() []Tool {
 			Actions: []ToolAction{
 				{
 					Name:        "save",
-					Description: "Save a piece of info to your private persona memory. Information stored here is isolated to your current persona. Use for persona-specific relationships, private observations, or specialized knowledge that shouldn't leak to other identities.",
+					Description: "Manage private observations and relationship dynamics isolated to your current identity. [AUTONOMOUS_POLICY]: Proactively save specialized knowledge and intimate dynamics. [DIRECTIVES]: 1. Keep entries concise and factual. 2. Prune contradictory or stale information autonomously. 3. Avoid duplicates; maintain high-utility data only. 4. Announce significant changes/deletions conversationally. [SYSTEM NOTE]: Timestamps (created/updated) are automatically managed by the system. Do NOT include timestamps in the key or content fields.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"key":     map[string]interface{}{"type": "string", "description": "Short mnemonic key (e.g. 'our_secret')"},
-							"content": map[string]interface{}{"type": "string", "description": "The information to remember"},
+							"key":     map[string]interface{}{"type": "string", "description": "Short mnemonic key (e.g. 'our_secret')."},
+							"content": map[string]interface{}{"type": "string", "description": "The information to remember."},
 						},
 						"required": []string{"key", "content"},
 					},
@@ -3406,6 +3558,23 @@ func getInternalTools() []Tool {
 							"identifier": map[string]interface{}{"type": "string", "description": "The identifier of the item to unpin"},
 						},
 						"required": []string{"identifier"},
+					},
+				},
+			},
+		},
+		{
+			Name: "TimerManager",
+			Actions: []ToolAction{
+				{
+					Name:        "set_timer",
+					Description: "You are empowered to proactively manage time and task follow-ups. Whenever a task, discussion point, or future-dated action is identified, you must assess if a timer or scheduled reminder is required to ensure task completion. You are authorized to invoke the TimerManager tool without requiring explicit confirmation from the user if it serves the goal of proactive assistance. Use your discretion to set timers for follow-ups, reminders, and context-switching, and announce them using the natural, conversational style previously established.",
+					Schema: map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"seconds": map[string]interface{}{"type": "integer", "description": "Number of seconds from now to trigger the timer"},
+							"label":   map[string]interface{}{"type": "string", "description": "A label/reason for the timer (e.g. 'check if project is done')"},
+						},
+						"required": []string{"seconds", "label"},
 					},
 				},
 			},
@@ -3617,6 +3786,59 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		return
 	}
 
+	if toolName == "TimerManager" || sanitizeFunctionName("TimerManager") == toolName {
+		session.Mutex.Lock()
+		t := session.ActiveThread()
+		id := session.appendNativeToolCall(nativeName, args, t)
+		result := ""
+
+		if actionName == "set_timer" {
+			seconds, _ := args["seconds"].(float64)
+			label, _ := args["label"].(string)
+
+			if seconds <= 0 {
+				result = "{\"status\": \"error\", \"message\": \"Seconds must be greater than 0.\"}"
+			} else {
+				triggerTime := time.Now().Add(time.Duration(seconds) * time.Second)
+				timer := &Timer{
+					ID:          generateID(),
+					TriggerTime: triggerTime,
+					Label:       label,
+					ThreadID:    t.ID,
+					Expired:     false,
+					Missed:      false,
+				}
+				err := addTimer(session.ClientID, timer)
+				if err != nil {
+					result = fmt.Sprintf("{\"status\": \"error\", \"message\": \"Failed to set timer: %v\"}", err)
+				} else {
+					result = fmt.Sprintf("{\"status\": \"success\", \"message\": \"Timer set for %s (%d seconds from now).\"}", triggerTime.Format("15:04:05"), int(seconds))
+				}
+			}
+		}
+
+		session.appendNativeToolResult(nativeName, result, t, id)
+
+		if session.ToolDebounceTimer != nil {
+			session.ToolDebounceTimer.Stop()
+		}
+		session.ToolDebounceTimer = time.AfterFunc(1500*time.Millisecond, func() {
+			session.Mutex.Lock()
+			ws := getLastActiveUIConn(session)
+			if ws == nil {
+				session.Mutex.Unlock()
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			session.ActiveCancel = cancel
+			session.Mutex.Unlock()
+
+			streamLLMAndTTS(ctx, "[SYSTEM: Tool results received.]", ws, session)
+		})
+
+		session.Mutex.Unlock()
+		return
+	}
 
 	isShared := toolName == "SharedMemory" || sanitizeFunctionName("SharedMemory") == toolName
 	isPersona := toolName == "PersonaMemory" || sanitizeFunctionName("PersonaMemory") == toolName
@@ -4039,13 +4261,15 @@ func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider stri
 		if len(sharedMemory) > 0 {
 			sysContent += "\n\n#### Shared Memory\n"
 			for k, v := range sharedMemory {
-				sysContent += fmt.Sprintf("- %s: %s\n", k, v)
+				updatedStr := time.Unix(v.Updated, 0).Format("2006-01-02 15:04:05")
+				sysContent += fmt.Sprintf("- %s: %s (updated %s)\n", k, v.Content, updatedStr)
 			}
 		}
 		if len(personaMemory) > 0 {
 			sysContent += fmt.Sprintf("\n\n#### Persona Memory (%s)\n", effectiveAssistantName)
 			for k, v := range personaMemory {
-				sysContent += fmt.Sprintf("- %s: %s\n", k, v)
+				updatedStr := time.Unix(v.Updated, 0).Format("2006-01-02 15:04:05")
+				sysContent += fmt.Sprintf("- %s: %s (updated %s)\n", k, v.Content, updatedStr)
 			}
 		}
 	}
@@ -4084,13 +4308,11 @@ func saveCalculatedContentWindow(session *ClientSession, body []byte) {
 	os.WriteFile(windowPath, body, 0644)
 }
 
-
 func mergePinnedItemsIntoContext(session *ClientSession, msgs []ChatMessage) []ChatMessage {
 	t := session.ActiveThread()
 	if t == nil || len(t.PinnedItems) == 0 {
 		return msgs
 	}
-
 
 	// Verify tool online status
 	var pinnedOut []string
@@ -4117,7 +4339,6 @@ func mergePinnedItemsIntoContext(session *ClientSession, msgs []ChatMessage) []C
 		}
 		item.Header.Status = status
 
-
 		content := item.Content
 		if status == "OFFLINE" {
 			content = "[NULL]"
@@ -4128,7 +4349,6 @@ func mergePinnedItemsIntoContext(session *ClientSession, msgs []ChatMessage) []C
 
 		pinnedOut = append(pinnedOut, block)
 	}
-
 
 	if len(pinnedOut) == 0 {
 		return msgs
@@ -4191,8 +4411,6 @@ func asyncUpdatePinnedItems(session *ClientSession, toolName string) {
 		session.Mutex.Unlock()
 	}
 }
-
-
 
 func prepareLLMHistory(msgs []ChatMessage, provider string) []ChatMessage {
 	var finalMsgs []ChatMessage
@@ -4322,11 +4540,8 @@ func streamLLMAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, ses
 
 	}
 
-
-
 	return streamLLMAndTTSInternal(ctx, prompt, ws, session, false)
 }
-
 
 func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession, isFallback bool) error {
 	// Per-client per-model rate limiting
@@ -4448,10 +4663,10 @@ func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.C
 
 func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession, apiKey string) error {
 	promptData := session.getSystemPromptData()
-	
+
 	// Hydrate heavy context items outside of session lock
 	promptData.SharedMemory = loadMemory(promptData.ClientID, "")
-	
+
 	session.Mutex.Lock()
 	model := session.Model
 	voice := session.Voice
@@ -4509,7 +4724,6 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	log.Printf("[LLM] Formatting history (turns: %d)...", len(contextMsgs))
 	formattedHistory := prepareLLMHistory(contextMsgs, "gemini")
 	log.Printf("[LLM] Submitting to Gemini API...")
-
 
 	type Part struct {
 		Text             string                 `json:"text,omitempty"`
@@ -4763,14 +4977,22 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					if p.VoiceFile != "" {
 						voiceFile = p.VoiceFile
 					}
-					if p.VoiceLengthScale > 0 { ls = p.VoiceLengthScale }
-					if p.VoiceNoiseScale > 0 { ns = p.VoiceNoiseScale }
-					if p.VoiceNoiseW > 0 { nw = p.VoiceNoiseW }
-					if p.VoiceVariance > 0 { vv = p.VoiceVariance }
+					if p.VoiceLengthScale > 0 {
+						ls = p.VoiceLengthScale
+					}
+					if p.VoiceNoiseScale > 0 {
+						ns = p.VoiceNoiseScale
+					}
+					if p.VoiceNoiseW > 0 {
+						nw = p.VoiceNoiseW
+					}
+					if p.VoiceVariance > 0 {
+						vv = p.VoiceVariance
+					}
 				}
 				personasMutex.RUnlock()
 
-				log.Printf("[Gemini TTS Worker] Streaming to remote piper: '%s' (voice: %s, ls: %.2f, ns: %.2f, nw: %.2f, var: %.2f)", 
+				log.Printf("[Gemini TTS Worker] Streaming to remote piper: '%s' (voice: %s, ls: %.2f, ns: %.2f, nw: %.2f, var: %.2f)",
 					text, voiceFile, ls, ns, nw, vv)
 				err := rp.Stream(ctx, voiceFile, text, true, ls, ns, nw, vv, func(jsonMeta string) {
 					if target != nil {
@@ -4785,7 +5007,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					log.Printf("[Gemini TTS Worker] Remote piper stream error: %v", err)
 				}
 			} else {
-				log.Printf("[Gemini TTS Worker] Processing chunk (len: %d) with local piper binary: '%s'", 
+				log.Printf("[Gemini TTS Worker] Processing chunk (len: %d) with local piper binary: '%s'",
 					len(text), text)
 				audioBytes, err := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				if err != nil {
@@ -4942,7 +5164,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		if finalResp != "" {
 			session.appendMessage("assistant", finalResp, t)
 		}
-		
+
 		// Only perform maintenance if the turn completed naturally
 		if ctx.Err() == nil {
 			if len(t.History) > 30 {
@@ -4972,7 +5194,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
 	promptData := session.getSystemPromptData()
-	
+
 	// Hydrate heavy context items outside of session lock
 	promptData.SharedMemory = loadMemory(promptData.ClientID, "")
 
@@ -5012,7 +5234,6 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	formattedHistory := prepareLLMHistory(contextMsgs, "ollama")
 	log.Printf("[LLM] Submitting to Ollama API model: %s...", model)
 	session.Mutex.Unlock()
-
 
 	var ollamaMsgs []map[string]interface{}
 	ollamaMsgs = append(ollamaMsgs, map[string]interface{}{
@@ -5250,14 +5471,22 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					if p.VoiceFile != "" {
 						voiceFile = p.VoiceFile
 					}
-					if p.VoiceLengthScale > 0 { ls = p.VoiceLengthScale }
-					if p.VoiceNoiseScale > 0 { ns = p.VoiceNoiseScale }
-					if p.VoiceNoiseW > 0 { nw = p.VoiceNoiseW }
-					if p.VoiceVariance > 0 { vv = p.VoiceVariance }
+					if p.VoiceLengthScale > 0 {
+						ls = p.VoiceLengthScale
+					}
+					if p.VoiceNoiseScale > 0 {
+						ns = p.VoiceNoiseScale
+					}
+					if p.VoiceNoiseW > 0 {
+						nw = p.VoiceNoiseW
+					}
+					if p.VoiceVariance > 0 {
+						vv = p.VoiceVariance
+					}
 				}
 				personasMutex.RUnlock()
 
-				log.Printf("[Ollama TTS Worker] Streaming to remote piper: '%s' (voice: %s, ls: %.2f, ns: %.2f, nw: %.2f, var: %.2f)", 
+				log.Printf("[Ollama TTS Worker] Streaming to remote piper: '%s' (voice: %s, ls: %.2f, ns: %.2f, nw: %.2f, var: %.2f)",
 					text, voiceFile, ls, ns, nw, vv)
 				err := rp.Stream(ctx, voiceFile, text, true, ls, ns, nw, vv, func(jsonMeta string) {
 					if target != nil {
@@ -5272,7 +5501,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 					log.Printf("[Ollama TTS Worker] Remote piper stream error: %v", err)
 				}
 			} else {
-				log.Printf("[Ollama TTS Worker] Processing chunk (len: %d) with local piper binary: '%s'", 
+				log.Printf("[Ollama TTS Worker] Processing chunk (len: %d) with local piper binary: '%s'",
 					len(text), text)
 				audioBytes, err := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
 				if err != nil {
@@ -5558,7 +5787,6 @@ func generateSummaryAsync(messages []ChatMessage, threadID string, session *Clie
 	}
 }
 
-
 func findSentenceBoundary(text string, minLength int, hardLimit int, paragraphOnly bool) int {
 	if paragraphOnly {
 		// Stage 2: Relaxed splitting — prefer paragraph breaks (\n\n)
@@ -5784,7 +6012,7 @@ func queryTTS(text string, voice string, userName string, personaName string, ph
 		}
 		// Convert to 0..1 then map to -0.08..0.08
 		v := float64(binary.LittleEndian.Uint64(b)) / float64(1<<64)
-		newVal := base + (v*0.16) - 0.08
+		newVal := base + (v * 0.16) - 0.08
 		if newVal < 0.01 {
 			newVal = 0.01
 		}
@@ -6029,17 +6257,17 @@ func handlePerformanceMetrics(w http.ResponseWriter, r *http.Request) {
 
 	perfMetricsMu.Lock()
 	ttsNodesMutex.RLock()
-	
+
 	resp := map[string]interface{}{
-		"llm":          perfMetrics,
-		"sttStatus":    sttManager.GetStatus(),
-		"ttsNodes":     ttsNodes,
+		"llm":       perfMetrics,
+		"sttStatus": sttManager.GetStatus(),
+		"ttsNodes":  ttsNodes,
 	}
 	data, err := json.MarshalIndent(resp, "", "  ")
-	
+
 	ttsNodesMutex.RUnlock()
 	perfMetricsMu.Unlock()
-	
+
 	if err != nil {
 		http.Error(w, `{"error":"serialisation error"}`, http.StatusInternalServerError)
 		return
@@ -6062,18 +6290,18 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	ttsStatus := make([]map[string]interface{}, len(ttsNodes))
 	for i, node := range ttsNodes {
 		ttsStatus[i] = map[string]interface{}{
-			"url":            node.URL,
-			"healthy":        !node.Zombie,
-			"totalRequests":  node.TotalRequests,
-			"totalFailures":  node.TotalFailures,
-			"failureCount":   node.FailureCount,
+			"url":           node.URL,
+			"healthy":       !node.Zombie,
+			"totalRequests": node.TotalRequests,
+			"totalFailures": node.TotalFailures,
+			"failureCount":  node.FailureCount,
 		}
 	}
 	ttsNodesMutex.RUnlock()
 
 	resp := map[string]interface{}{
-		"stt": sttStatus,
-		"tts": ttsStatus,
+		"stt":       sttStatus,
+		"tts":       ttsStatus,
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
 
@@ -6083,12 +6311,15 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	go startBackupRoutine()
+	startTimerManager()
+	initPushManager()
 
 	http.HandleFunc("/auth/login", handleLogin)
 	http.HandleFunc("/auth/logout", handleLogout)
 	http.HandleFunc("/auth/callback", handleCallback)
 	http.HandleFunc("/api/models", handleModels)
 	http.HandleFunc("/api/voices", handleVoices)
+	http.HandleFunc("/api/vapid-public-key", handleGetVapidPublicKey)
 	http.HandleFunc("/api/performance-metrics", handlePerformanceMetrics)
 	http.HandleFunc("/status", handleStatus)
 	http.HandleFunc("/ws", handleConnections)
