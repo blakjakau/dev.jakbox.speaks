@@ -144,6 +144,7 @@ func (api *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	active, cache, totalSize, metrics := api.Manager.GetDetailedStatus()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"service_type":              "piper",
 		"active_model":              active,
 		"cached_models":             cache,
 		"total_cache_size_estimate": totalSize,

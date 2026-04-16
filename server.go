@@ -66,10 +66,13 @@ type AdminConfigOverride struct {
 	ModelLimits          *map[string]ModelRateLimit `json:"ModelLimits,omitempty"`
 	SystemPromptGemini   *string                    `json:"SystemPromptGemini,omitempty"`
 	SystemPromptOllama   *string                    `json:"SystemPromptOllama,omitempty"`
+	SystemPromptLlamaCpp *string                    `json:"SystemPromptLlamaCpp,omitempty"`
 	MaxTokensGemini      *int                       `json:"MaxTokensGemini,omitempty"`
 	MaxTokensOllama      *int                       `json:"MaxTokensOllama,omitempty"`
+	MaxTokensLlamaCpp    *int                       `json:"MaxTokensLlamaCpp,omitempty"`
 	PassiveWindowSeconds *int                       `json:"PassiveWindowSeconds,omitempty"`
 	WakeWords            *[]string                  `json:"WakeWords,omitempty"`
+	LlamaCppURLs         *[]string                  `json:"LlamaCppURLs,omitempty"`
 }
 
 type Config struct {
@@ -86,8 +89,10 @@ type Config struct {
 	MaxArchiveTurns      int                            `json:"MaxArchiveTurns"`
 	MaxTokensGemini      int                            `json:"MaxTokensGemini"`
 	MaxTokensOllama      int                            `json:"MaxTokensOllama"`
+	MaxTokensLlamaCpp    int                            `json:"MaxTokensLlamaCpp"`
 	SystemPromptGemini   string                         `json:"SystemPromptGemini"`
 	SystemPromptOllama   string                         `json:"SystemPromptOllama"`
+	SystemPromptLlamaCpp string                         `json:"SystemPromptLlamaCpp"`
 	ToolSystemPrompt     string                         `json:"ToolSystemPrompt"`
 	Admins               map[string]AdminConfigOverride `json:"Admins"`
 	ModelLimits          map[string]ModelRateLimit      `json:"ModelLimits"`
@@ -95,6 +100,9 @@ type Config struct {
 	FallbackLLM          FallbackLLMConfig              `json:"FallbackLLM"`
 	GeminiModels         []string                       `json:"GeminiModels"`
 	OllamaModels         []string                       `json:"OllamaModels"`
+	LlamaCppModels       []string                       `json:"LlamaCppModels"`
+	LlamaCppURLs         []string                       `json:"LlamaCppURLs"`
+	LlamaCppModel        string                         `json:"LlamaCppModel"`
 	STTMinBuffer         float64                        `json:"STTMinBuffer"`
 	STTMaxBuffer         float64                        `json:"STTMaxBuffer"`
 	STTEnergyThreshold   float64                        `json:"STTEnergyThreshold"`
@@ -112,11 +120,8 @@ func (c *Config) Validate() error {
 	if len(c.STTServers) == 0 {
 		return fmt.Errorf("STTServers cannot be empty")
 	}
-	if len(c.OllamaURLs) == 0 {
-		return fmt.Errorf("OllamaURLs cannot be empty")
-	}
-	if len(c.OllamaChatURL) == 0 {
-		return fmt.Errorf("OllamaChatURL cannot be empty")
+	if len(c.OllamaChatURL) == 0 && len(c.LlamaCppURLs) == 0 {
+		return fmt.Errorf("must provide either OllamaChatURL or LlamaCppURLs")
 	}
 	if c.PiperBin == "" {
 		return fmt.Errorf("PiperBin cannot be empty")
@@ -134,6 +139,7 @@ var (
 	ttsIndex        uint32
 	ollamaIndex     uint32
 	ollamaChatIndex uint32
+	llamaCppIndex   uint32
 )
 
 var (
@@ -353,18 +359,135 @@ func recordLLMCall(provider, model string, promptTokens, responseTokens, latency
 
 // ---- End Performance Metrics --------------------------------------------
 
+type VoiceOption struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
 type PiperNode struct {
-	URL           string
-	Zombie        bool
-	FailureCount  int
-	TotalRequests int
-	TotalFailures int
+	URL             string
+	Zombie          bool
+	ServiceType     string
+	AvailableVoices []string
+	FailureCount    int
+	TotalRequests   int
+	TotalFailures   int
 }
 
 var (
 	ttsNodes      []*PiperNode
 	ttsNodesMutex sync.RWMutex
 )
+
+func matchVoice(pattern string, available []string) string {
+	if strings.HasSuffix(pattern, "*") {
+		prefix := strings.TrimSuffix(pattern, "*")
+		for _, v := range available {
+			if strings.HasPrefix(v, prefix) {
+				return v
+			}
+		}
+	} else {
+		for _, v := range available {
+			if v == pattern {
+				return v
+			}
+			// Check without .onnx extensions to handle Piper filenames vs config names
+			if strings.TrimSuffix(v, ".onnx") == strings.TrimSuffix(pattern, ".onnx") {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func (s *ClientSession) resolveVoice(p *Persona) (*PiperNode, string, error) {
+	ttsNodesMutex.RLock()
+	defer ttsNodesMutex.RUnlock()
+
+	allowedPool := s.GetTTSServers()
+	allowedMap := make(map[string]bool)
+	for _, u := range allowedPool {
+		allowedMap[u] = true
+	}
+
+	// 1. Try modern Voice array if present
+	if len(p.Voice) > 0 {
+		for _, opt := range p.Voice {
+			// Try all nodes for this option
+			for _, node := range ttsNodes {
+				if node.Zombie || !allowedMap[node.URL] {
+					continue
+				}
+				// If opt.Type is specified, must match. If empty, any node type works.
+				if opt.Type != "" && node.ServiceType != opt.Type {
+					continue
+				}
+				if matched := matchVoice(opt.Name, node.AvailableVoices); matched != "" {
+					return node, matched, nil
+				}
+			}
+		}
+	}
+
+	// 2. Fallback to legacy VoiceFile
+	if p.VoiceFile != "" {
+		for _, node := range ttsNodes {
+			if node.Zombie || !allowedMap[node.URL] {
+				continue
+			}
+			if matched := matchVoice(p.VoiceFile, node.AvailableVoices); matched != "" {
+				return node, matched, nil
+			}
+		}
+	}
+
+	return nil, "", fmt.Errorf("no suitable TTS node found for persona %s", p.Name)
+}
+
+func (s *ClientSession) setupRemoteTTS(targetPersonaName string, defaultVoice string) (*tts.RemotePiper, string) {
+	s.Mutex.Lock()
+	clientVersion := s.Version
+	s.Mutex.Unlock()
+
+	if clientVersion < 1 {
+		return nil, ""
+	}
+
+	personasMutex.RLock()
+	p, hasPersona := personas[strings.ToLower(targetPersonaName)]
+	personasMutex.RUnlock()
+
+	if hasPersona {
+		if node, voiceName, err := s.resolveVoice(&p); err == nil {
+			log.Printf("[TTS] Resolved voice '%s' on node %s for persona %s", voiceName, node.URL, targetPersonaName)
+			rp, err := tts.NewRemotePiper(node.URL)
+			if err == nil {
+				return rp, voiceName
+			}
+			log.Printf("[TTS] Failed to connect to resolved node %s: %v", node.URL, err)
+		}
+	}
+
+	// Fallback to simple healthy node if resolveVoice failed or connection failed
+	if node, err := s.getHealthyTTSNode(); err == nil {
+		log.Printf("[TTS] Falling back to healthy node %s", node.URL)
+		rp, err := tts.NewRemotePiper(node.URL)
+		if err == nil {
+			// Try to match the voice name on this node if possible
+			voiceName := defaultVoice
+			if hasPersona && p.VoiceFile != "" {
+				voiceName = p.VoiceFile
+			}
+			if matched := matchVoice(voiceName, node.AvailableVoices); matched != "" {
+				voiceName = matched
+			}
+			return rp, voiceName
+		}
+	}
+
+	return nil, ""
+}
 
 var ErrNoTTSNodes = fmt.Errorf("no TTS service nodes available")
 
@@ -579,20 +702,56 @@ type PersonaTheme struct {
 }
 
 type Persona struct {
-	Name                  string       `json:"name"`
-	NameMutations         string       `json:"name_mutations"`
-	PhoneticPronunciation string       `json:"phonetic_pronunciation"`
-	Tone                  string       `json:"tone"`
-	AddressStyle          string       `json:"address_style"`
-	Focus                 string       `json:"focus"`
-	InteractionStyle      string       `json:"interaction_style"`
-	Constraints           string       `json:"constraints"`
-	VoiceFile             string       `json:"voice_file"`
-	VoiceNoiseScale       float64      `json:"voice_noise_scale,omitempty"`
-	VoiceLengthScale      float64      `json:"voice_length_scale,omitempty"`
-	VoiceNoiseW           float64      `json:"voice_noise_w,omitempty"`
-	VoiceVariance         float64      `json:"voice_variance,omitempty"`
-	Theme                 PersonaTheme `json:"theme"`
+	Name                  string        `json:"name"`
+	NameMutations         string        `json:"name_mutations"`
+	PhoneticPronunciation string        `json:"phonetic_pronunciation"`
+	Tone                  string        `json:"tone"`
+	AddressStyle          string        `json:"address_style"`
+	Focus                 string        `json:"focus"`
+	InteractionStyle      string        `json:"interaction_style"`
+	Constraints           string        `json:"constraints"`
+	VoiceFile             string        `json:"voice_file"`
+	Voice                 []VoiceOption `json:"voice"`
+	VoiceNoiseScale       float64       `json:"voice_noise_scale,omitempty"`
+	VoiceLengthScale      float64       `json:"voice_length_scale,omitempty"`
+	VoiceNoiseW           float64       `json:"voice_noise_w,omitempty"`
+	VoiceVariance         float64       `json:"voice_variance,omitempty"`
+	Theme                 PersonaTheme  `json:"theme"`
+}
+
+func (p *Persona) UnmarshalJSON(data []byte) error {
+	type Alias Persona
+	aux := &struct {
+		Voice json.RawMessage `json:"voice"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	if len(aux.Voice) > 0 {
+		// Try to unmarshal as []VoiceOption
+		var voiceOptions []VoiceOption
+		if err := json.Unmarshal(aux.Voice, &voiceOptions); err == nil {
+			p.Voice = voiceOptions
+		} else {
+			// Try to unmarshal as []string
+			var voiceStrings []string
+			if err := json.Unmarshal(aux.Voice, &voiceStrings); err == nil {
+				p.Voice = make([]VoiceOption, len(voiceStrings))
+				for i, s := range voiceStrings {
+					p.Voice[i] = VoiceOption{Name: s}
+				}
+			} else {
+				// If it's something else, let it be empty or return error
+				// Actually, if it's not a list, it's invalid
+			}
+		}
+	}
+
+	return nil
 }
 
 var (
@@ -806,6 +965,7 @@ type SystemPromptData struct {
 	IsAdmin                bool
 	SystemPromptGemini     string
 	SystemPromptOllama     string
+	SystemPromptLlamaCpp   string
 	Tools                  map[string]*Tool
 	ActiveThreadSummary    string
 	PinnedItems            map[string]*PinnedItem
@@ -878,6 +1038,17 @@ func (s *ClientSession) GetSystemPromptOllama() string {
 	return config.SystemPromptOllama
 }
 
+func (s *ClientSession) GetSystemPromptLlamaCpp() string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.SystemPromptLlamaCpp != nil {
+			return *override.SystemPromptLlamaCpp
+		}
+	}
+	return config.SystemPromptLlamaCpp
+}
+
 func (s *ClientSession) GetMaxTokensGemini() int {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
@@ -898,6 +1069,17 @@ func (s *ClientSession) GetMaxTokensOllama() int {
 		}
 	}
 	return config.MaxTokensOllama
+}
+
+func (s *ClientSession) GetMaxTokensLlamaCpp() int {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.MaxTokensLlamaCpp != nil {
+			return *override.MaxTokensLlamaCpp
+		}
+	}
+	return config.MaxTokensLlamaCpp
 }
 
 func (s *ClientSession) GetPassiveWindowSeconds() int {
@@ -996,6 +1178,7 @@ func (s *ClientSession) getSystemPromptData() *SystemPromptData {
 		IsAdmin:             s.IsAdminCache,
 		SystemPromptGemini:  s.GetSystemPromptGemini(),
 		SystemPromptOllama:  s.GetSystemPromptOllama(),
+		SystemPromptLlamaCpp: s.GetSystemPromptLlamaCpp(),
 		Tools:               toolsCopy,
 		ActiveThreadSummary: summary,
 		PinnedItems:         pinnedCopy,
@@ -1258,10 +1441,6 @@ func normalisePersonaName(session *ClientSession, content string) string {
 }
 
 func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Time) bool {
-	if !session.PassiveAssistant {
-		return true // Always attentive
-	}
-
 	if baseTime.IsZero() {
 		baseTime = time.Now()
 	}
@@ -1270,7 +1449,7 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	wakeWords := session.GetWakeWords()
 	passiveWindowSeconds := session.GetPassiveWindowSeconds()
 
-	// Check persona-specific wake words (Name and Mutations)
+	// 1. Check for wake words FIRST (Wake words exempt the utterance from length gating)
 	session.Mutex.Lock()
 	v := session.Voice
 	session.Mutex.Unlock()
@@ -1279,6 +1458,7 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 	p, hasP := personas[vName]
 	personasMutex.RUnlock()
 
+	wakeWordMatched := false
 	if hasP {
 		pWords := []string{strings.ToLower(p.Name)}
 		if p.NameMutations != "" {
@@ -1286,34 +1466,53 @@ func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Ti
 		}
 		for _, word := range pWords {
 			if word != "" && strings.Contains(lowerPrompt, word) {
-				session.Mutex.Lock()
-				session.LastActiveTime = time.Now()
-				session.Mutex.Unlock()
 				log.Printf("[RUMBLE] Persona wake word detected at %v: '%s' (Persona: %s)", baseTime.Format("15:04:05.000"), word, p.Name)
-				return true
+				wakeWordMatched = true
+				break
 			}
 		}
 	}
 
-	for _, word := range wakeWords {
-		if strings.Contains(lowerPrompt, word) {
-			session.Mutex.Lock()
-			session.LastActiveTime = time.Now()
-			session.Mutex.Unlock()
-			log.Printf("[RUMBLE] Wake word detected at %v: '%s'", baseTime.Format("15:04:05.000"), word)
-			return true
+	if !wakeWordMatched {
+		for _, word := range wakeWords {
+			if word != "" && strings.Contains(lowerPrompt, word) {
+				log.Printf("[RUMBLE] Wake word detected at %v: '%s'", baseTime.Format("15:04:05.000"), word)
+				wakeWordMatched = true
+				break
+			}
 		}
 	}
 
+	if wakeWordMatched {
+		session.Mutex.Lock()
+		session.LastActiveTime = time.Now()
+		session.Mutex.Unlock()
+		return true
+	}
+
+	// 2. Apply word-count gate for all non-wake-word utterances
+	// This reduces barge-ins and false triggers from background noise.
+	words := strings.Fields(prompt)
+	if len(words) < 3 {
+		log.Printf("[RUMBLE] Ignored short utterance (< 3 words) at %v: '%s'", baseTime.Format("15:04:05.000"), prompt)
+		return false
+	}
+
+	// 3. Check Attention Mode
+	if !session.PassiveAssistant {
+		return true // Always attentive mode, but passed length audit
+	}
+
+	// 4. Check passive window (previously active)
 	session.Mutex.Lock()
 	recentlyActive := baseTime.Sub(session.LastActiveTime) < time.Duration(passiveWindowSeconds)*time.Second
 	if recentlyActive {
-		session.LastActiveTime = time.Now() // Reset the window from the moment of processing
+		session.LastActiveTime = time.Now() // Reset the window
 	}
 	session.Mutex.Unlock()
 
 	if recentlyActive {
-		log.Printf("[RUMBLE] Processed prompt within 60s active window (Start: %v).", baseTime.Format("15:04:05.000"))
+		log.Printf("[RUMBLE] Processed prompt within active window (Start: %v).", baseTime.Format("15:04:05.000"))
 		return true
 	}
 
@@ -2132,6 +2331,11 @@ func (s *ClientSession) resolveFallback(currentModel string) (string, string) {
 			return "ollama", fallback
 		}
 	}
+	for _, m := range config.LlamaCppModels {
+		if m == fallback {
+			return "llamacpp", fallback
+		}
+	}
 
 	// If not found in lists, check if it has a limit entry (usually enough to identify)
 	if _, exists := config.ModelLimits[fallback]; exists {
@@ -2156,7 +2360,11 @@ func getMidnightPTBound(now time.Time) time.Time {
 	return boundary
 }
 
-func (s *ClientSession) checkRateLimitUnsafe(model string) (string, error) {
+func (s *ClientSession) checkRateLimitUnsafe(provider, model string) (string, error) {
+	if provider != "gemini" {
+		return "", nil
+	}
+
 	limits := s.GetModelLimit(model)
 
 	// If no limits defined at all, allow
@@ -2237,7 +2445,11 @@ func (s *ClientSession) checkRateLimitUnsafe(model string) (string, error) {
 	return warning, nil
 }
 
-func (s *ClientSession) checkRateLimit(model string) (string, error) {
+func (s *ClientSession) checkRateLimit(provider, model string) (string, error) {
+	if provider != "gemini" {
+		return "", nil
+	}
+
 	limits := s.GetModelLimit(model)
 
 	// If no limits defined at all, allow
@@ -2931,6 +3143,19 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 					Version          int    `json:"version"`
 				}
 				if err := json.Unmarshal([]byte(strings.TrimPrefix(text, "[SETTINGS]")), &settings); err == nil {
+					// Auto-resolve default model if client cleared it (e.g., during provider switch)
+					if settings.Model == "" {
+						configMutex.RLock()
+						if settings.Provider == "gemini" && len(config.GeminiModels) > 0 {
+							settings.Model = config.GeminiModels[0]
+						} else if settings.Provider == "ollama" {
+							settings.Model = config.OllamaModel
+						} else if settings.Provider == "llamacpp" {
+							settings.Model = config.LlamaCppModel
+						}
+						configMutex.RUnlock()
+					}
+
 					session.Mutex.Lock()
 					changed := session.UserName != settings.UserName ||
 						session.GoogleName != settings.GoogleName ||
@@ -3793,7 +4018,16 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 		result := ""
 
 		if actionName == "set_timer" {
-			seconds, _ := args["seconds"].(float64)
+			// Handle both numeric (float64) and string-encoded numbers from model output
+			var seconds float64
+			switch v := args["seconds"].(type) {
+			case float64:
+				seconds = v
+			case string:
+				if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+					seconds = parsed
+				}
+			}
 			label, _ := args["label"].(string)
 
 			if seconds <= 0 {
@@ -4043,6 +4277,74 @@ func getOllamaModelsInternal(isAdmin bool) []ModelData {
 
 // selectFallbackModel is deprecated. Use (s *ClientSession).resolveFallback and the traversal logic in streamLLMAndTTSInternal.
 
+func getLlamaCppModelsInternal(isAdmin bool) []ModelData {
+	var out []ModelData
+
+	configMutex.RLock()
+	chatURLs := config.LlamaCppURLs
+
+	configMutex.RUnlock()
+
+	if len(chatURLs) == 0 {
+		return out
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for _, baseURL := range chatURLs {
+		var modelsURL string
+		parsedURL, parseErr := url.Parse(baseURL)
+		if parseErr == nil && parsedURL.Scheme != "" && parsedURL.Host != "" {
+			modelsURL = parsedURL.Scheme + "://" + parsedURL.Host + "/v1/models"
+		} else {
+			// Fallback: simple string replacement if URL parsing fails
+			modelsURL = strings.Replace(baseURL, "/chat/completions", "/models", 1)
+			if !strings.HasSuffix(modelsURL, "/models") {
+				modelsURL = baseURL + "/v1/models"
+			}
+		}
+
+		resp, err := client.Get(modelsURL)
+		if err != nil {
+			log.Printf("[LlamaCpp] Failed to check models at %s: %v", modelsURL, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[LlamaCpp] Models request to %s returned status %s", modelsURL, resp.Status)
+			continue
+		}
+
+		var res struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			log.Printf("[LlamaCpp] Failed to parse LlamaCpp models from %s: %v", modelsURL, err)
+			continue
+		}
+
+		for _, m := range res.Data {
+
+
+			// Deduplicate models across multiple servers
+			exists := false
+			for _, existing := range out {
+				if existing.ID == m.ID {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				out = append(out, ModelData{ID: m.ID, Name: m.ID})
+			}
+		}
+	}
+	return out
+}
+
 func getGeminiModelsInternal(apiKey string, isAdmin bool) []ModelData {
 	var out []ModelData
 	if apiKey == "" {
@@ -4174,6 +4476,8 @@ func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider stri
 	var basePrompt string
 	if provider == "gemini" {
 		basePrompt = data.SystemPromptGemini
+	} else if provider == "llamacpp" {
+		basePrompt = data.SystemPromptLlamaCpp
 	} else {
 		basePrompt = data.SystemPromptOllama
 	}
@@ -4229,13 +4533,15 @@ func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider stri
 		sysContent += getSystemStatusPromptData(data, provider)
 	}
 
-	// 6. Pinned Context Instructions
-	sysContent += "\n\n### Pinned Context Management\n"
-	sysContent += "You have the ability to 'pin' items (like specific notes or scratchpad entries) to your active context. "
-	sysContent += "Pinned items are injected into your context window automatically, providing deterministic state awareness and allowing you to track changes in real-time. "
-	sysContent += "Use `ContextManager:pin_item` to pin an item and `ContextManager:unpin_item` to remove it. "
-	sysContent += "When an item is pinned, it appears in your history with a `[PINNED_ITEM_HEADER]` block. "
-	sysContent += "Status `ONLINE` implies the source tool is connected; `OFFLINE` means the tool is disconnected and content may be hidden or stale."
+	// 6. Pinned Context Instructions (skip for local models — they rely on structured tools only)
+	if provider == "gemini" {
+		sysContent += "\n\n### Pinned Context Management\n"
+		sysContent += "You have the ability to 'pin' items (like specific notes or scratchpad entries) to your active context. "
+		sysContent += "Pinned items are injected into your context window automatically, providing deterministic state awareness and allowing you to track changes in real-time. "
+		sysContent += "Use `ContextManager:pin_item` to pin an item and `ContextManager:unpin_item` to remove it. "
+		sysContent += "When an item is pinned, it appears in your history with a `[PINNED_ITEM_HEADER]` block. "
+		sysContent += "Status `ONLINE` implies the source tool is connected; `OFFLINE` means the tool is disconnected and content may be hidden or stale."
+	}
 
 	// 5b. Tool support check
 	toolsSupported := true
@@ -4243,6 +4549,10 @@ func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider stri
 		toolsSupported = ollamaModelSupportsTools(model)
 	} else if provider == "gemini" {
 		toolsSupported = strings.Contains(strings.ToLower(model), "gemini")
+	} else if provider == "llamacpp" {
+		// Llama.cpp via OpenAI API technically supports tools if the model does. 
+		// We'll assume true but could add a detection later.
+		toolsSupported = true
 	}
 
 	// 7. Tiered Memory (Shared & Persona)
@@ -4274,12 +4584,20 @@ func prepareSystemPrompt(data *SystemPromptData, model, voiceName, provider stri
 		}
 	}
 
-	if len(data.Tools) > 0 && toolsSupported {
-		configMutex.RLock()
-		toolDirective := config.ToolSystemPrompt
-		configMutex.RUnlock()
-		if toolDirective != "" {
-			sysContent += "\n\n" + toolDirective
+	if toolsSupported {
+		if provider == "gemini" {
+			// Gemini is large enough to handle verbose prose tool guidance
+			if len(data.Tools) > 0 {
+				configMutex.RLock()
+				toolDirective := config.ToolSystemPrompt
+				configMutex.RUnlock()
+				if toolDirective != "" {
+					sysContent += "\n\n" + toolDirective
+				}
+			}
+		} else {
+			// Local models (Ollama, LlamaCpp): short, direct instruction to use native tool calling
+			sysContent += "\n\nYou have access to tools via native function calling. When a user request requires a tool, invoke it directly using the tool calling mechanism. Do NOT describe or simulate tool calls in text. Just call them."
 		}
 	}
 
@@ -4554,7 +4872,7 @@ func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.C
 	// 1. Recovery Logic: If we are currently on a fallback, check if original model is now available
 	// Skip recovery if we are currently in a recursive fallback turn to avoid immediate loops.
 	if !isFallback && origModel != "" {
-		_, err := session.checkRateLimitUnsafe(origModel)
+		_, err := session.checkRateLimitUnsafe(origProvider, origModel)
 		if err == nil {
 			log.Printf("[LLM] Rate limits for %s have reset. Restoring original model for client %s.", origModel, session.ClientID)
 			session.Mutex.Lock()
@@ -4573,7 +4891,7 @@ func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.C
 	}
 
 	// 2. Rate Limit Check
-	warning, err := session.checkRateLimit(model)
+	warning, err := session.checkRateLimit(session.Provider, model)
 	if err != nil {
 		log.Printf("[LLM] Rate limit exceeded for client %s model %s: %v", session.ClientID, model, err)
 
@@ -4597,7 +4915,7 @@ func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.C
 			}
 
 			// Check if this fallback candidate is also rate-limited
-			_, err := session.checkRateLimit(fallbackModel)
+			_, err := session.checkRateLimit(fallbackProvider, fallbackModel)
 			if err == nil {
 				// Success! Use this model
 				session.Mutex.Lock()
@@ -4657,6 +4975,9 @@ func streamLLMAndTTSInternal(ctx context.Context, prompt string, ws *websocket.C
 	log.Printf("[LLM] %s", session.getRateLimitLogString(modelForLog))
 	if provider == "gemini" && apiKey != "" {
 		return streamGeminiAndTTS(ctx, prompt, ws, session, apiKey)
+	}
+	if provider == "llamacpp" {
+		return streamLlamaCppAndTTS(ctx, prompt, ws, session)
 	}
 	return streamOllamaAndTTS(ctx, prompt, ws, session)
 }
@@ -4872,7 +5193,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				}
 
 				// Check if this fallback is healthy
-				_, err := session.checkRateLimit(fbModel)
+				_, err := session.checkRateLimit(fbProv, fbModel)
 				if err == nil {
 					found = true
 					break
@@ -4931,22 +5252,15 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	go func() {
 		defer wg.Done()
 		var rp *tts.RemotePiper
-		var rpErr error
 
 		session.Mutex.Lock()
 		clientVersion := session.Version
 		session.Mutex.Unlock()
 
+		var matchedVoice string
 		if clientVersion >= 1 {
-			if node, err := session.getHealthyTTSNode(); err == nil {
-				log.Printf("[Gemini TTS Worker] version %d detected. Connecting to remote TTS server at %s", clientVersion, node.URL)
-				rp, rpErr = tts.NewRemotePiper(node.URL)
-				if rpErr != nil {
-					log.Printf("[Gemini TTS Worker] failed to connect to remote TTS: %v", rpErr)
-				} else {
-					defer rp.Close()
-				}
-			} else {
+			rp, matchedVoice = session.setupRemoteTTS(targetPersonaName, voice)
+			if rp == nil {
 				log.Printf("[Gemini TTS Worker] version %d detected but no healthy TTS nodes found. Falling back to local.", clientVersion)
 			}
 		}
@@ -4970,11 +5284,14 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				}
 			} else if clientVersion >= 1 && rp != nil {
 				// Resolve the onnx filename and synthesis parameters from personas
-				voiceFile := voice // Default to the id
+				voiceFile := matchedVoice
+				if voiceFile == "" {
+					voiceFile = voice
+				}
 				ls, ns, nw, vv := 1.0, 0.667, 0.8, 0.25
 				personasMutex.RLock()
 				if p, ok := personas[strings.ToLower(targetPersonaName)]; ok {
-					if p.VoiceFile != "" {
+					if p.VoiceFile != "" && voiceFile == "" {
 						voiceFile = p.VoiceFile
 					}
 					if p.VoiceLengthScale > 0 {
@@ -5312,7 +5629,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	url := getNextURL(ollamaChatURLs, &ollamaChatIndex)
 	log.Printf("[Ollama] Sending request to %s | model=%s | messages=%d | tools=%d | payload_bytes=%d",
 		url, model, len(ollamaMsgs), len(ollamaTools), len(body))
-	log.Printf("[Ollama] Payload JSON (first 2000 chars): %.2000s", string(body))
+	log.Printf("[Ollama] Payload JSON (first 200 chars): %.200s", string(body))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
@@ -5359,7 +5676,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				}
 
 				// Check if this fallback is healthy
-				_, err := session.checkRateLimit(fbModel)
+				_, err := session.checkRateLimit(fbProv, fbModel)
 				if err == nil {
 					found = true
 					break
@@ -5425,22 +5742,15 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	go func() {
 		defer wg.Done()
 		var rp *tts.RemotePiper
-		var rpErr error
 
 		session.Mutex.Lock()
 		clientVersion := session.Version
 		session.Mutex.Unlock()
 
+		var matchedVoice string
 		if clientVersion >= 1 {
-			if node, err := session.getHealthyTTSNode(); err == nil {
-				log.Printf("[Ollama TTS Worker] version %d detected. Connecting to remote TTS server at %s", clientVersion, node.URL)
-				rp, rpErr = tts.NewRemotePiper(node.URL)
-				if rpErr != nil {
-					log.Printf("[Ollama TTS Worker] failed to connect to remote TTS: %v", rpErr)
-				} else {
-					defer rp.Close()
-				}
-			} else {
+			rp, matchedVoice = session.setupRemoteTTS(targetPersonaName, voice)
+			if rp == nil {
 				log.Printf("[Ollama TTS Worker] version %d detected but no healthy TTS nodes found. Falling back to local.", clientVersion)
 			}
 		}
@@ -5464,11 +5774,14 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 				}
 			} else if clientVersion >= 1 && rp != nil {
 				// Resolve the onnx filename and synthesis parameters from personas
-				voiceFile := voice // Default to the id
+				voiceFile := matchedVoice
+				if voiceFile == "" {
+					voiceFile = voice
+				}
 				ls, ns, nw, vv := 1.0, 0.667, 0.8, 0.25
 				personasMutex.RLock()
 				if p, ok := personas[strings.ToLower(targetPersonaName)]; ok {
-					if p.VoiceFile != "" {
+					if p.VoiceFile != "" && voiceFile == "" {
 						voiceFile = p.VoiceFile
 					}
 					if p.VoiceLengthScale > 0 {
@@ -5658,6 +5971,455 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 		session.Mutex.Unlock()
 		saveSession(session)
 	}
+	return nil
+}
+
+func streamLlamaCppAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, session *ClientSession) error {
+	promptData := session.getSystemPromptData()
+
+	// Hydrate heavy context items outside of session lock
+	promptData.SharedMemory = loadMemory(promptData.ClientID, "")
+
+	session.Mutex.Lock()
+	model := session.Model
+	voice := session.Voice
+	configMutex.RLock()
+	llamaCppModelConfig := config.LlamaCppModel
+	defaultVoiceConfig := config.DefaultVoice
+	configMutex.RUnlock()
+	session.Mutex.Unlock()
+
+	if model == "" {
+		model = llamaCppModelConfig
+	}
+	if voice == "" {
+		voice = defaultVoiceConfig
+	}
+	voiceName := extractVoiceName(voice)
+	promptData.PersonaMemory = loadMemory(promptData.ClientID, voiceName)
+
+	sysContent := prepareSystemPrompt(promptData, model, voiceName, "llamacpp")
+	saveCalculatedSystemPrompt(session, sysContent)
+
+	targetPersonaName := promptData.TargetPersonaName
+	phoneticPersonaName := promptData.PhoneticPersonaName
+	effectiveUserName := promptData.EffectiveUserName
+
+	session.Mutex.Lock()
+	t := session.ActiveThread()
+	// Llama.cpp via OpenAI API technically supports tools if the model does
+	llamaCppSupportsTools := true
+	log.Printf("[LLM] Preparing context (LlamaCpp Tool Support: %v)...", llamaCppSupportsTools)
+	contextMsgs := session.getLLMContext(t, llamaCppSupportsTools)
+	log.Printf("[LLM] Merging pinned items (count: %d)...", len(t.PinnedItems))
+	contextMsgs = mergePinnedItemsIntoContext(session, contextMsgs)
+	log.Printf("[LLM] Formatting history (turns: %d)...", len(contextMsgs))
+	// LlamaCpp uses OpenAI format
+	formattedHistory := prepareLLMHistory(contextMsgs, "llamacpp")
+	log.Printf("[LLM] Submitting to LlamaCpp (OpenAI API) model: %s...", model)
+	session.Mutex.Unlock()
+
+	var messages []map[string]interface{}
+	messages = append(messages, map[string]interface{}{
+		"role":    "system",
+		"content": sysContent,
+	})
+
+	for _, m := range formattedHistory {
+		msg := map[string]interface{}{
+			"role":    m.Role,
+			"content": m.Content,
+		}
+		if m.ToolCall != nil {
+			argsJSON, _ := json.Marshal(m.ToolCall.Args)
+			msg["tool_calls"] = []interface{}{
+				map[string]interface{}{
+					"id":   m.ToolCall.ID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      m.ToolCall.Name,
+						"arguments": string(argsJSON),
+					},
+				},
+			}
+		} else if m.ToolResult != nil {
+			msg["role"] = "tool"
+			msg["tool_call_id"] = m.ToolResult.ID
+			msg["content"] = m.ToolResult.Result
+		}
+		messages = append(messages, msg)
+	}
+
+	messages = append(messages, map[string]interface{}{
+		"role":    "user",
+		"content": prompt,
+	})
+
+	// Resolve persona for output sanitisation
+	voiceNameLower := strings.ToLower(voiceName)
+	personasMutex.RLock()
+	persona, hasPersona := personas[voiceNameLower]
+	personasMutex.RUnlock()
+
+	var mutationRes []*regexp.Regexp
+	if hasPersona {
+		targetPersonaName = persona.Name
+		phoneticPersonaName = persona.PhoneticPronunciation
+		if persona.NameMutations != "" {
+			muts := strings.Fields(persona.NameMutations)
+			for _, m := range muts {
+				re := regexp.MustCompile("(?i)\\b" + regexp.QuoteMeta(m) + "\\b")
+				mutationRes = append(mutationRes, re)
+			}
+		}
+	}
+
+	llamaCppTools := getNativeToolsOllama(session)
+
+	// Determine tool injection strategy based on the running model.
+	// Llama 3.x models have a broken PEG parser that causes infinite generation loops
+	// when the native "tools" API field is used, so we inject tools as text instead
+	// and parse the JSON output manually. All other models (Gemma, Mistral, Qwen, etc.)
+	// support native tool calling via their own built-in templates and must use the
+	// standard API field.
+	modelLower := strings.ToLower(model)
+	useLLama3TextInjection := strings.Contains(modelLower, "llama-3") ||
+		strings.Contains(modelLower, "llama3") ||
+		strings.Contains(modelLower, "llama_3")
+
+	if len(llamaCppTools) > 0 {
+		if useLLama3TextInjection {
+			// Text injection: tools rendered as JSON in system message
+			toolJSON, _ := json.MarshalIndent(llamaCppTools, "", "  ")
+			toolInstruction := "\n\nYou have access to the following functions. To call a function, respond ONLY with a JSON object in this exact format:\n"
+			toolInstruction += "{\"name\": \"function_name\", \"parameters\": {\"arg\": \"value\"}}\n\n"
+			toolInstruction += "Do NOT include any other text when calling a function. Available functions:\n"
+			toolInstruction += string(toolJSON)
+			if len(messages) > 0 && messages[0]["role"] == "system" {
+				messages[0]["content"] = messages[0]["content"].(string) + toolInstruction
+			}
+			log.Printf("[LlamaCpp] Using text injection for tool calling (Llama 3.x model: %s)", model)
+		}
+	}
+
+	payload := map[string]interface{}{
+		"model":             model,
+		"messages":          messages,
+		"stream":            true,
+		"frequency_penalty": 0.5,
+		"temperature":       0.8,
+	}
+	if len(llamaCppTools) > 0 && !useLLama3TextInjection {
+		// Native tools API for models with proper template support
+		payload["tools"] = llamaCppTools
+		payload["tool_choice"] = "auto"
+		log.Printf("[LlamaCpp] Using native tools API (model: %s)", model)
+	}
+
+	body, _ := json.MarshalIndent(payload, "", "  ")
+	saveCalculatedContentWindow(session, body)
+
+	configMutex.RLock()
+	llamaCppURLs := config.LlamaCppURLs
+	configMutex.RUnlock()
+
+	url := getNextURL(llamaCppURLs, &llamaCppIndex)
+	log.Printf("[LlamaCpp] Sending request to %s | model=%s", url, model)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[LlamaCpp] Failed to create request: %v", err)
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	llmStartTime := time.Now()
+	if err != nil {
+		log.Printf("[LlamaCpp] HTTP request failed: %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("llamacpp API error: %s - %s", resp.Status, string(bodyBytes))
+	}
+
+	ttsChan := make(chan string, 50)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var rp *tts.RemotePiper
+		session.Mutex.Lock()
+		clientVersion := session.Version
+		session.Mutex.Unlock()
+		var matchedVoice string
+		if clientVersion >= 1 {
+			rp, matchedVoice = session.setupRemoteTTS(targetPersonaName, voice)
+		}
+
+		for text := range ttsChan {
+			if ctx.Err() != nil {
+				return
+			}
+			session.Mutex.Lock()
+			isClientTts := session.ClientTts
+			session.Mutex.Unlock()
+			target := ws
+			if target == nil || session.isToolConn(target) {
+				target = getLastActiveUIConn(session)
+			}
+			if isClientTts {
+				if target != nil {
+					safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+text))
+				}
+			} else if clientVersion >= 1 && rp != nil {
+				voiceFile := matchedVoice
+				if voiceFile == "" {
+					voiceFile = voice
+				}
+				ls, ns, nw, vv := 1.0, 0.667, 0.8, 0.25
+				personasMutex.RLock()
+				if p, ok := personas[strings.ToLower(targetPersonaName)]; ok {
+					if p.VoiceFile != "" && voiceFile == "" {
+						voiceFile = p.VoiceFile
+					}
+					if p.VoiceLengthScale > 0 {
+						ls = p.VoiceLengthScale
+					}
+					if p.VoiceNoiseScale > 0 {
+						ns = p.VoiceNoiseScale
+					}
+					if p.VoiceNoiseW > 0 {
+						nw = p.VoiceNoiseW
+					}
+					if p.VoiceVariance > 0 {
+						vv = p.VoiceVariance
+					}
+				}
+				personasMutex.RUnlock()
+				rp.Stream(ctx, voiceFile, text, true, ls, ns, nw, vv, func(jsonMeta string) {
+					if target != nil {
+						safeWrite(target, session, websocket.TextMessage, []byte("[TTS_CHUNK]"+jsonMeta))
+					}
+				}, func(pcm []byte) {
+					if target != nil {
+						safeWrite(target, session, websocket.BinaryMessage, pcm)
+					}
+				})
+			} else {
+				audioBytes, _ := queryTTS(text, voice, effectiveUserName, targetPersonaName, phoneticPersonaName)
+				if audioBytes != nil && target != nil {
+					safeWrite(target, session, websocket.BinaryMessage, audioBytes)
+				}
+			}
+		}
+	}()
+
+	var sentence strings.Builder
+	var fullResponse strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	var sessionPromptTokens, sessionRespTokens, sessionTokens int64
+	firstChunkSent := false
+
+	type toolBuffer struct {
+		Name string
+		Args strings.Builder
+	}
+	activeToolCalls := make(map[int]*toolBuffer)
+
+	isJSONOutput := false
+	jsonStarted := false
+
+	flushPendingText := func(text string) {
+		if text == "" {
+			return
+		}
+		if hasPersona && len(mutationRes) > 0 {
+			for _, re := range mutationRes {
+				text = re.ReplaceAllString(text, targetPersonaName)
+			}
+		}
+
+		fullResponse.WriteString(text)
+
+		// Only do JSON detection in Llama 3.x text-injection mode
+		if useLLama3TextInjection && !jsonStarted {
+			trimmed := strings.TrimSpace(fullResponse.String())
+			if len(trimmed) > 0 {
+				if strings.HasPrefix(trimmed, "{") {
+					isJSONOutput = true
+				}
+				jsonStarted = true
+			}
+		}
+
+		// Suppress JSON from going to transcription/TTS (Llama 3.x text injection only)
+		if isJSONOutput {
+			return
+		}
+
+		sendOrBroadcastText(nil, session, []byte(text))
+		sentence.WriteString(text)
+	}
+
+	processTTSSentence := func() {
+		if isJSONOutput {
+			return
+		}
+		currentStr := sentence.String()
+		splitIdx := findSentenceBoundary(currentStr, 30, 250, firstChunkSent)
+		if splitIdx != -1 {
+			chunk := currentStr[:splitIdx+1]
+			remainder := currentStr[splitIdx+1:]
+			ttsText := strings.TrimSpace(chunk)
+			if len(ttsText) > 0 {
+				normalized := tts.Sanitise(ttsText, effectiveUserName, targetPersonaName, phoneticPersonaName)
+				select {
+				case ttsChan <- normalized:
+					firstChunkSent = true
+				case <-ctx.Done():
+				}
+			}
+			sentence.Reset()
+			sentence.WriteString(remainder)
+		}
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				break
+			}
+			var result struct {
+				Choices []struct {
+					Delta struct {
+						Content   string `json:"content"`
+						ToolCalls []struct {
+							Index    int    `json:"index"`
+							ID       string `json:"id"`
+							Function struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							} `json:"function"`
+						} `json:"tool_calls"`
+					} `json:"delta"`
+					FinishReason string `json:"finish_reason"`
+				} `json:"choices"`
+				Usage struct {
+					PromptTokens     int64 `json:"prompt_tokens"`
+					CompletionTokens int64 `json:"completion_tokens"`
+					TotalTokens      int64 `json:"total_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.Unmarshal([]byte(data), &result); err == nil {
+				if result.Usage.TotalTokens > 0 {
+					sessionTokens = result.Usage.TotalTokens
+					sessionPromptTokens = result.Usage.PromptTokens
+					sessionRespTokens = result.Usage.CompletionTokens
+				}
+				if len(result.Choices) > 0 {
+					delta := result.Choices[0].Delta
+					if len(delta.ToolCalls) > 0 {
+						for _, tc := range delta.ToolCalls {
+							idx := tc.Index
+							if _, ok := activeToolCalls[idx]; !ok {
+								activeToolCalls[idx] = &toolBuffer{}
+							}
+							if tc.Function.Name != "" {
+								activeToolCalls[idx].Name += tc.Function.Name
+							}
+							if tc.Function.Arguments != "" {
+								activeToolCalls[idx].Args.WriteString(tc.Function.Arguments)
+							}
+						}
+					}
+					if delta.Content != "" {
+						flushPendingText(delta.Content)
+						processTTSSentence()
+					}
+				}
+			}
+		}
+	}
+
+	if clean := strings.TrimSpace(sentence.String()); len(clean) > 0 {
+		normalized := tts.Sanitise(clean, effectiveUserName, targetPersonaName, phoneticPersonaName)
+		select {
+		case ttsChan <- normalized:
+		case <-ctx.Done():
+		}
+	}
+
+	close(ttsChan)
+	wg.Wait()
+
+	if ctx.Err() == nil || fullResponse.Len() > 0 {
+		// Append user turn and any assistant text BEFORE executing tool calls,
+		// so history order is always: user → assistant_tool_call → tool_result.
+		session.Mutex.Lock()
+		t := session.ActiveThread()
+		if !strings.HasPrefix(prompt, "[") {
+			session.appendMessage("user", prompt, t)
+		}
+		// Only save non-JSON responses as assistant text messages.
+		// JSON tool call outputs are saved via executeNativeToolCall's
+		// appendNativeToolCall path, so we suppress them here.
+		if !isJSONOutput && len(activeToolCalls) == 0 {
+			final := fullResponse.String()
+			if final != "" {
+				session.appendMessage("assistant", final, t)
+			}
+		}
+		session.Mutex.Unlock()
+
+		if sessionTokens > 0 {
+			trackTokens(session, model, sessionTokens)
+			recordLLMCall("llamacpp", model, sessionPromptTokens, sessionRespTokens, time.Since(llmStartTime).Milliseconds())
+		}
+		saveSession(session)
+	}
+
+	// Execute tool calls AFTER history is written, so ordering is correct.
+	// Finalize structured tool calls (from native API, e.g. when PEG parser works)
+	for _, tb := range activeToolCalls {
+		if tb.Name != "" {
+			var args map[string]interface{}
+			argStr := tb.Args.String()
+			log.Printf("[LlamaCpp] Finalizing native tool call: %s | Args: %s", tb.Name, argStr)
+			if err := json.Unmarshal([]byte(argStr), &args); err == nil {
+				executeNativeToolCall(session, tb.Name, args, ws)
+			} else {
+				log.Printf("[LlamaCpp] Failed to parse tool arguments: %v", err)
+			}
+		}
+	}
+
+	// Finalize text-injected tool calls: the model outputted raw JSON because
+	// llama.cpp's PEG parser couldn't handle native tool boundaries. Parse it here.
+	// Only applies to Llama 3.x models using text injection.
+	if useLLama3TextInjection && isJSONOutput && len(activeToolCalls) == 0 {
+		raw := strings.TrimSpace(fullResponse.String())
+		// Strip any looping — take only the first valid JSON object
+		if end := strings.Index(raw, "}\nassistant"); end != -1 {
+			raw = raw[:end+1]
+		}
+		var tc struct {
+			Name       string                 `json:"name"`
+			Parameters map[string]interface{} `json:"parameters"`
+		}
+		if err := json.Unmarshal([]byte(raw), &tc); err == nil && tc.Name != "" {
+			log.Printf("[LlamaCpp] Parsed text-injected tool call: %s | Args: %v", tc.Name, tc.Parameters)
+			executeNativeToolCall(session, tc.Name, tc.Parameters, ws)
+		} else {
+			log.Printf("[LlamaCpp] Failed to parse text tool call from: %.200s | err: %v", raw, err)
+		}
+	}
+
 	return nil
 }
 
@@ -6201,6 +6963,8 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		out = getGeminiModelsInternal(apiKey, isAdmin)
 	} else if provider == "ollama" {
 		out = getOllamaModelsInternal(isAdmin)
+	} else if provider == "llamacpp" {
+		out = getLlamaCppModelsInternal(isAdmin)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -6292,6 +7056,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		ttsStatus[i] = map[string]interface{}{
 			"url":           node.URL,
 			"healthy":       !node.Zombie,
+			"type":          node.ServiceType,
 			"totalRequests": node.TotalRequests,
 			"totalFailures": node.TotalFailures,
 			"failureCount":  node.FailureCount,
@@ -6311,6 +7076,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	go startBackupRoutine()
+	go startTTSPolling()
 	startTimerManager()
 	initPushManager()
 
@@ -6341,6 +7107,146 @@ func startBackupRoutine() {
 			runBackups()
 		}
 	}()
+}
+
+func startTTSPolling() {
+	ticker := time.NewTicker(60 * time.Second)
+	// Run once immediately
+	pollTTSNodes()
+	for range ticker.C {
+		pollTTSNodes()
+	}
+}
+
+func pollTTSNodes() {
+	ttsNodesMutex.RLock()
+	nodes := make([]*PiperNode, len(ttsNodes))
+	copy(nodes, ttsNodes)
+	ttsNodesMutex.RUnlock()
+
+	client := http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	for _, node := range nodes {
+		// 1. Check Status
+		resp, err := client.Get(node.URL + "/status")
+		if err != nil {
+			node.FailureCount++
+			if node.FailureCount >= 3 {
+				node.Zombie = true
+			}
+			log.Printf("[TTS Poller] Error polling %s: %v (Failures: %d)", node.URL, err, node.FailureCount)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			node.FailureCount++
+			if node.FailureCount >= 3 {
+				node.Zombie = true
+			}
+			log.Printf("[TTS Poller] Node %s returned status %s (Failures: %d)", node.URL, resp.Status, node.FailureCount)
+			continue
+		}
+
+		var status struct {
+			ServiceType string `json:"service_type"`
+			Service     string `json:"service"` // Fallback for Spark-TTS if needed
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+			resp.Body.Close()
+			log.Printf("[TTS Poller] Failed to decode status from %s: %v", node.URL, err)
+			continue
+		}
+		resp.Body.Close()
+
+		node.Zombie = false
+		node.FailureCount = 0
+		if status.ServiceType != "" {
+			node.ServiceType = status.ServiceType
+		} else if status.Service != "" {
+			node.ServiceType = status.Service
+		}
+
+		if node.ServiceType == "" {
+			// Heuristic/Default if not provided
+			if strings.Contains(node.URL, "4410") {
+				node.ServiceType = "piper"
+			} else if strings.Contains(node.URL, "4411") || strings.Contains(node.URL, "4412") {
+				node.ServiceType = "kokoro"
+			} else if strings.Contains(node.URL, "4413") {
+				node.ServiceType = "spark-tts"
+			}
+		}
+
+		// 2. Fetch Models (Voices)
+		mResp, err := client.Get(node.URL + "/models")
+		if err == nil && mResp.StatusCode == http.StatusOK {
+			bodyBytes, _ := io.ReadAll(mResp.Body)
+			mResp.Body.Close()
+
+			var voices []string
+
+			// Strategy 1: Simple list of strings ["voice1", "voice2"]
+			if err := json.Unmarshal(bodyBytes, &voices); err == nil && len(voices) > 0 {
+				node.AvailableVoices = voices
+			} else {
+				// Strategy 2: Map with an array under a common key like "voices", "models", "items"
+				var genericMap map[string]json.RawMessage
+				if err := json.Unmarshal(bodyBytes, &genericMap); err == nil {
+					potentialKeys := []string{"voices", "models", "items", "data", "list"}
+					for _, k := range potentialKeys {
+						if data, ok := genericMap[k]; ok {
+							// Try string list
+							var sList []string
+							if err := json.Unmarshal(data, &sList); err == nil && len(sList) > 0 {
+								voices = sList
+								break
+							}
+							// Try object list with id/name
+							var oList []map[string]interface{}
+							if err := json.Unmarshal(data, &oList); err == nil && len(oList) > 0 {
+								for _, item := range oList {
+									if id, ok := item["id"].(string); ok {
+										voices = append(voices, id)
+									} else if name, ok := item["name"].(string); ok {
+										voices = append(voices, name)
+									}
+								}
+								if len(voices) > 0 {
+									break
+								}
+							}
+						}
+					}
+				}
+
+				// Strategy 3: Just look for *any* array of objects with "id"/"name" at top level
+				if len(voices) == 0 {
+					var topLevelList []map[string]interface{}
+					if err := json.Unmarshal(bodyBytes, &topLevelList); err == nil && len(topLevelList) > 0 {
+						for _, item := range topLevelList {
+							if id, ok := item["id"].(string); ok {
+								voices = append(voices, id)
+							} else if name, ok := item["name"].(string); ok {
+								voices = append(voices, name)
+							}
+						}
+					}
+				}
+
+				node.AvailableVoices = voices
+			}
+			if len(node.AvailableVoices) > 0 {
+				newVoiceCount := len(node.AvailableVoices)
+				// Only log if it's a significant event (discovery or change) to reduce noise
+				log.Printf("[TTS Poller] Node %s (%s) healthy, %d voices available", node.URL, node.ServiceType, newVoiceCount)
+			}
+		} else if err == nil {
+			mResp.Body.Close()
+		}
+	}
 }
 
 func runBackups() {
