@@ -100,7 +100,7 @@
 		"functional_mode": "social",
 		
 		"voice": [
-			{ "type": "kokoro", "name": "bf_alice" },
+			{ "type": "kokoro", "name": "af_sky" },
 			{ "type": "piper", "name": "maddy-medium" }
 		],
 		"voice_file": "maddy-medium.onnx",

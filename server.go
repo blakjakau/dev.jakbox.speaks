@@ -199,140 +199,7 @@ func init() {
 		log.Fatal("FATAL: Missing Google OAuth credentials. Provide google-client-secret.json or launch using:\n\nGOOGLE_CLIENT_ID=\"your_id\" GOOGLE_CLIENT_SECRET=\"your_secret\" go run server.go\n")
 	}
 
-	loadPersonas("personas.json")
-	watchPersonas("personas.json")
-
 	perfMetrics = loadPerformanceMetrics()
-}
-
-type PersonaTheme struct {
-	Primary    string `json:"primary"`
-	Secondary  string `json:"secondary"`
-	Tertiary   string `json:"tertiary"`
-	Background string `json:"background"`
-	Panel      string `json:"panel"`
-}
-
-type Persona struct {
-	Name                  string        `json:"name"`
-	NameMutations         string        `json:"name_mutations"`
-	PhoneticPronunciation string        `json:"phonetic_pronunciation"`
-	Tone                  string        `json:"tone"`
-	AddressStyle          string        `json:"address_style"`
-	Focus                 string        `json:"focus"`
-	InteractionStyle      string        `json:"interaction_style"`
-	Constraints           string        `json:"constraints"`
-	VoiceFile             string        `json:"voice_file"`
-	Voice                 []VoiceOption `json:"voice"`
-	VoiceNoiseScale       float64       `json:"voice_noise_scale,omitempty"`
-	VoiceLengthScale      float64       `json:"voice_length_scale,omitempty"`
-	VoiceNoiseW           float64       `json:"voice_noise_w,omitempty"`
-	VoiceVariance         float64       `json:"voice_variance,omitempty"`
-	Theme                 PersonaTheme  `json:"theme"`
-}
-
-func (p *Persona) UnmarshalJSON(data []byte) error {
-	type Alias Persona
-	aux := &struct {
-		Voice json.RawMessage `json:"voice"`
-		*Alias
-	}{
-		Alias: (*Alias)(p),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-
-	if len(aux.Voice) > 0 {
-		// Try to unmarshal as []VoiceOption
-		var voiceOptions []VoiceOption
-		if err := json.Unmarshal(aux.Voice, &voiceOptions); err == nil {
-			p.Voice = voiceOptions
-		} else {
-			// Try to unmarshal as []string
-			var voiceStrings []string
-			if err := json.Unmarshal(aux.Voice, &voiceStrings); err == nil {
-				p.Voice = make([]VoiceOption, len(voiceStrings))
-				for i, s := range voiceStrings {
-					p.Voice[i] = VoiceOption{Name: s}
-				}
-			} else {
-				// If it's something else, let it be empty or return error
-				// Actually, if it's not a list, it's invalid
-			}
-		}
-	}
-
-	return nil
-}
-
-var (
-	personas      map[string]Persona
-	personasMutex sync.RWMutex
-)
-
-func loadPersonas(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
-	var newPersonas map[string]Persona
-	if err := json.Unmarshal(data, &newPersonas); err != nil {
-		return err
-	}
-
-	personasMutex.Lock()
-	personas = newPersonas
-	personasMutex.Unlock()
-	log.Printf("Loaded %d personas from %s", len(personas), path)
-	return nil
-}
-
-func watchPersonas(path string) {
-	initialStat, err := os.Stat(path)
-	if err != nil {
-		log.Printf("Error stating personas file: %v", err)
-		return
-	}
-
-	lastModTime := initialStat.ModTime()
-	ticker := time.NewTicker(2 * time.Second)
-	go func() {
-		for range ticker.C {
-			stat, err := os.Stat(path)
-			if err != nil {
-				continue
-			}
-			if stat.ModTime().After(lastModTime) {
-				lastModTime = stat.ModTime()
-				log.Println("Personas file change detected, reloading...")
-				if err := loadPersonas(path); err != nil {
-					log.Printf("FAILED to reload personas: %v (Update ignored)", err)
-				} else {
-					log.Println("Personas successfully reloaded, updating active sessions...")
-					activeSessionsMutex.Lock()
-					for _, session := range activeSessions {
-						session.Mutex.Lock()
-						if session.Voice != "" {
-							vName := strings.ToLower(extractVoiceName(session.Voice))
-							personasMutex.RLock()
-							if p, ok := personas[vName]; ok {
-								if session.Theme != p.Theme {
-									session.Theme = p.Theme
-									log.Printf("Updated theme for session %s (voice: %s)", session.ClientID, vName)
-								}
-							}
-							personasMutex.RUnlock()
-						}
-						session.Mutex.Unlock()
-						sendSettings(nil, session) // Broadcast updated settings (including theme)
-					}
-					activeSessionsMutex.Unlock()
-				}
-			}
-		}
-	}()
 }
 
 var (
@@ -921,36 +788,9 @@ func (s *ClientSession) getLLMContext(thread *Thread, supportsTools bool) []Chat
 	return finalized
 }
 
-func normalisePersonaName(session *ClientSession, content string) string {
-	session.Mutex.Lock()
-	v := session.Voice
-	session.Mutex.Unlock()
+// ---- normalisePersonaName moved to persona_manager.go ----
 
-	vName := strings.ToLower(extractVoiceName(v))
-	personasMutex.RLock()
-	persona, personaOk := personas[vName]
-	personasMutex.RUnlock()
 
-	if personaOk && persona.NameMutations != "" {
-		mutations := strings.Fields(persona.NameMutations)
-		oldContent := content
-		for _, m := range mutations {
-			if m == "" {
-				continue
-			}
-			re := regexp.MustCompile("(?i)\\b" + regexp.QuoteMeta(m) + "\\b")
-			if re.MatchString(content) {
-				newContent := re.ReplaceAllString(content, persona.Name)
-				log.Printf("[STT] Match found! Mutation '%s' replaced. '%s' -> '%s'", m, content, newContent)
-				content = newContent
-			}
-		}
-		if content != oldContent {
-			log.Printf("[STT] Prompt normalised: '%s' -> '%s'", oldContent, content)
-		}
-	}
-	return content
-}
 
 func shouldProcessPrompt(session *ClientSession, prompt string, baseTime time.Time) bool {
 	if baseTime.IsZero() {
@@ -3416,25 +3256,8 @@ func executeNativeToolCall(session *ClientSession, nativeName string, args map[s
 	}
 }
 
-func extractVoiceName(filename string) string {
-	base := strings.TrimSuffix(filename, ".onnx")
+// ---- extractVoiceName moved to persona_manager.go ----
 
-	// Strip known technical suffixes first
-	re := regexp.MustCompile(`-(qint8|int8|fp16|low|medium|high|standard)$`)
-	base = re.ReplaceAllString(base, "")
-
-	parts := strings.Split(base, "-")
-	if len(parts) >= 2 {
-		// If it looks like lang-name (e.g. en_GB-alba), return the name
-		// Check if first part looks like a language code (e.g. en_GB, en_US)
-		langRe := regexp.MustCompile(`^[a-z]{2}_[A-Z]{2}$`)
-		if langRe.MatchString(parts[0]) {
-			return strings.Join(parts[1:], "-")
-		}
-	}
-	// Otherwise return the remaining base
-	return base
-}
 
 func getOllamaModelsInternal(isAdmin bool) []ModelData {
 	var out []ModelData
@@ -6215,40 +6038,8 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(out)
 }
 
-func handleVoices(w http.ResponseWriter, r *http.Request) {
-	type PersonaInfo struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		VoiceFile string `json:"voice_file"`
-	}
+// ---- handleVoices moved to persona_manager.go ----
 
-	personasMutex.RLock()
-	defer personasMutex.RUnlock()
-
-	var out []PersonaInfo
-	for id, p := range personas {
-		if p.VoiceFile == "" {
-			continue
-		}
-		// Check if the voice file actually exists
-		modelPath := filepath.Join(".", "piper", "models", p.VoiceFile)
-		if _, err := os.Stat(modelPath); err == nil {
-			out = append(out, PersonaInfo{
-				ID:        id,
-				Name:      p.Name,
-				VoiceFile: p.VoiceFile,
-			})
-		}
-	}
-
-	// Sort by name for UI consistency
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Name < out[j].Name
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
-}
 
 // ---- handlePerformanceMetrics moved to metrics.go ----
 
