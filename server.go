@@ -2777,7 +2777,7 @@ func getInternalTools() []Tool {
 			Actions: []ToolAction{
 				{
 					Name:        "save",
-					Description: "Manage global context and user preferences accessible across all personas. [AUTONOMOUS_POLICY]: Proactively identify and save key facts/decisions without requiring explicit commands. [DIRECTIVES]: 1. Prioritize high-density facts over conversational noise. 2. Periodically prune obsolete/redundant entries. 3. Merge related items to maintain efficiency. 4. Briefly notify user of significant updates in your current persona's style. [SYSTEM NOTE]: Timestamps (created/updated) are automatically managed by the system. Do NOT include timestamps in the key or content fields.",
+					Description: "Proactively save and manage global user preferences and key facts. Keep entries high-density, merge related items, and avoid conversational noise. Do not manually include timestamps in fields.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -2789,7 +2789,7 @@ func getInternalTools() []Tool {
 				},
 				{
 					Name:        "delete",
-					Description: "Forget a piece of info from shared memory. Use when information is corrected, updated, or no longer relevant.",
+					Description: "Delete obsolete or incorrect info from shared memory.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -2805,7 +2805,7 @@ func getInternalTools() []Tool {
 			Actions: []ToolAction{
 				{
 					Name:        "save",
-					Description: "Manage private observations and relationship dynamics isolated to your current identity. [AUTONOMOUS_POLICY]: Proactively save specialized knowledge and intimate dynamics. [DIRECTIVES]: 1. Keep entries concise and factual. 2. Prune contradictory or stale information autonomously. 3. Avoid duplicates; maintain high-utility data only. 4. Announce significant changes/deletions conversationally. [SYSTEM NOTE]: Timestamps (created/updated) are automatically managed by the system. Do NOT include timestamps in the key or content fields.",
+					Description: "Proactively save private observations and persona-specific dynamics. Keep entries concise, factual, and high-utility. Do not manually include timestamps in fields.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -2817,7 +2817,7 @@ func getInternalTools() []Tool {
 				},
 				{
 					Name:        "delete",
-					Description: "Forget a piece of info from your private persona memory.",
+					Description: "Delete obsolete info from persona memory.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -2833,7 +2833,7 @@ func getInternalTools() []Tool {
 			Actions: []ToolAction{
 				{
 					Name:        "sleep",
-					Description: "Enter passive mode immediately and stop listening for 15 seconds unless a wake word is used. Use this when the user says goodbye or indicates the conversation is over.",
+					Description: "Enter passive mode (stops listening for 15s). Use when the conversation ends or user says goodbye.",
 					Schema: map[string]interface{}{
 						"type":       "object",
 						"properties": map[string]interface{}{},
@@ -2846,7 +2846,7 @@ func getInternalTools() []Tool {
 			Actions: []ToolAction{
 				{
 					Name:        "pin_item",
-					Description: "Pin a data item (note, scratchpad, etc) to the persistent context. This ensures the item is always visible and up-to-date in your context.",
+					Description: "Pin an item (like a note or scratchpad) to make it persistently visible.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -2876,7 +2876,7 @@ func getInternalTools() []Tool {
 			Actions: []ToolAction{
 				{
 					Name:        "set_timer",
-					Description: "You are empowered to proactively manage time and task follow-ups. Whenever a task, discussion point, or future-dated action is identified, you must assess if a timer or scheduled reminder is required to ensure task completion. You are authorized to invoke the TimerManager tool without requiring explicit confirmation from the user if it serves the goal of proactive assistance. Use your discretion to set timers for follow-ups, reminders, and context-switching, and announce them using the natural, conversational style previously established.",
+					Description: "Proactively set timers for reminders, follow-ups, or tasks. You may invoke this autonomously without explicit confirmation. Announce the timer conversationally.",
 					Schema: map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{

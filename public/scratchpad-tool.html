@@ -515,12 +515,12 @@
         // --- Speax Integration ---
         const toolClient = new SpeaxToolClient(window.location.origin, `ScratchPad ${currentDeviceName}`);
         
-        toolClient.registerAction('get_scratches', 'List all named elements in the scratchpad.', {}, async () => {
+        toolClient.registerAction('get_scratches', 'List all scratchpad items.', {}, async () => {
             const items = getItems().map(i => ({ id: i.id, title: i.title, type: i.type }));
             return { items };
         });
 
-        toolClient.registerAction('read_scratch', 'Read the content of a specific scratch item.', {
+        toolClient.registerAction('read_scratch', 'Read a scratchpad item.', {
             type: 'object', 
             properties: { 
                 id: { type: 'string' },
@@ -543,7 +543,7 @@
         });
 
 
-        toolClient.registerAction('create_scratch', 'Create a new scratch item.', {
+        toolClient.registerAction('create_scratch', 'Create a scratchpad item.', {
             type: 'object', 
             properties: { 
                 title: { type: 'string' }, 
@@ -567,7 +567,7 @@
             return { id: newItem.id, status: "created" };
         });
 
-        toolClient.registerAction('update_scratch', 'Update an existing scratch item. Use this to refine or change content.', {
+        toolClient.registerAction('update_scratch', 'Update a scratchpad item to refine its content.', {
             type: 'object',
             properties: {
                 id: { type: 'string' },
@@ -592,7 +592,7 @@
             return { id: p.id, status: "updated" };
         });
 
-        toolClient.registerAction('delete_scratch', 'Delete a specific scratch item.', {
+        toolClient.registerAction('delete_scratch', 'Delete a scratchpad item.', {
             type: 'object',
             properties: { id: { type: 'string' } },
             required: ['id']
