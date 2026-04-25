@@ -1,0 +1,17 @@
+# Build artifacts
+build/
+bin/
+dist/
+
+# Intermediary files
+kokoro-service
+result.bin
+temp_refine.bin
+mixes.json
+
+# Dependencies
+lib/
+onnxruntime/
+models/
+venv/
+node_modules/

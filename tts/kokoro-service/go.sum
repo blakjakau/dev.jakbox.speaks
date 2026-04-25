@@ -1,0 +1,10 @@
+github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
+github.com/k2-fsa/sherpa-onnx-go v1.12.35 h1:0awAxgw4j2ZrtC3xZGY4C+f/iYdAhOdcDKnsd1Zk8Bo=
+github.com/k2-fsa/sherpa-onnx-go v1.12.35/go.mod h1:B/ynRbVa5gpYoZYeYgY3zPi4MTfKk95UZueZDSIhbjk=
+github.com/k2-fsa/sherpa-onnx-go-linux v1.12.35 h1:Ri+uKWtMvAXPEo3lY6UDJR23AybX/6F8CFgj/HrlxWo=
+github.com/k2-fsa/sherpa-onnx-go-linux v1.12.35/go.mod h1:NXEH2rsBgTdqY59YpPq6CtSBlBAXy/8a9FmpLERU97I=
+github.com/k2-fsa/sherpa-onnx-go-macos v1.12.35 h1:MGMqAj5FC3fhOzuNfU67OjPGmt8QNgthVQs+X8jg74Y=
+github.com/k2-fsa/sherpa-onnx-go-macos v1.12.35/go.mod h1:ZOhUAXC62Unj0ZNfu6zxSFKcW96aXf7P3BsqiUyOBbE=
+github.com/k2-fsa/sherpa-onnx-go-windows v1.12.35 h1:gKUqpwPTSdt6c8EF0urF8el1TY2MFI9NlLBoGUJyxhU=
+github.com/k2-fsa/sherpa-onnx-go-windows v1.12.35/go.mod h1:5AX7TU8+P/gInjglY1ijtWUM2b8iyR0QX4yEngzMe64=

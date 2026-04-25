@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kokoro Zero-Shot Lab</title>
+    <style>
+        :root {
+            --primary: #bb86fc;
+            --secondary: #03dac6;
+            --background: #0f0f0f;
+            --surface: #1a1a1a;
+            --surface-variant: #252525;
+            --on-surface: #e0e0e0;
+            --on-surface-muted: #a0a0a0;
+            --outline: #333333;
+            --accent: #ff4081;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--background);
+            color: var(--on-surface);
+            margin: 0;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar stats */
+        .sidebar {
+            width: 300px;
+            background: var(--surface);
+            border-right: 1px solid var(--outline);
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem;
+        }
+
+        .main-content {
+            flex: 1;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+            overflow-y: auto;
+        }
+
+        h1 { font-size: 1.5rem; margin: 0 0 1.5rem 0; color: var(--primary); }
+        h2 { font-size: 1rem; margin: 0 0 1rem 0; color: var(--secondary); text-transform: uppercase; letter-spacing: 1px; }
+
+        .card {
+            background: var(--surface);
+            border-radius: 16px;
+            border: 1px solid var(--outline);
+            padding: 2rem;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }
+
+        /* Drop Zone */
+        .drop-zone {
+            border: 2px dashed var(--outline);
+            border-radius: 12px;
+            padding: 3rem;
+            text-align: center;
+            transition: all 0.3s ease;
+            background: rgba(255,255,255,0.02);
+            cursor: pointer;
+        }
+
+        .drop-zone.hover {
+            border-color: var(--primary);
+            background: rgba(187, 134, 252, 0.05);
+        }
+
+        .drop-zone i { font-size: 2rem; display: block; margin-bottom: 1rem; }
+
+        .file-list {
+            margin-top: 1.5rem;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .file-item {
+            background: var(--surface-variant);
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        /* Console */
+        .console {
+            background: #000;
+            border-radius: 12px;
+            padding: 1rem;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem;
+            color: #00ff00;
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid var(--outline);
+        }
+
+        .console-entry { margin-bottom: 0.5rem; border-bottom: 1px solid #111; padding-bottom: 0.25rem; }
+        .console-time { color: #666; font-size: 0.75rem; margin-right: 0.5rem; }
+
+        /* Controls */
+        .controls {
+            display: flex;
+            gap: 1.5rem;
+            align-items: flex-end;
+            margin-top: 1rem;
+        }
+
+        .input-group { display: flex; flex-direction: column; gap: 0.5rem; flex: 1; }
+        label { font-size: 0.75rem; font-weight: 600; color: var(--on-surface-muted); text-transform: uppercase; }
+
+        select, input[type="text"], input[type="number"] {
+            background: var(--surface-variant);
+            border: 1px solid var(--outline);
+            color: white;
+            padding: 0.75rem;
+            border-radius: 8px;
+            outline: none;
+        }
+
+        button {
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+        }
+
+        button.primary { background: var(--primary); color: #000; }
+        button.primary:hover { opacity: 0.9; transform: translateY(-1px); }
+        button.secondary { background: var(--surface-variant); color: white; border: 1px solid var(--outline); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Preview Area */
+        .preview-area {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        textarea {
+            background: var(--surface-variant);
+            border: 1px solid var(--outline);
+            color: white;
+            padding: 1rem;
+            border-radius: 12px;
+            resize: none;
+            height: 80px;
+            outline: none;
+        }
+
+        .stat-item {
+            margin-bottom: 1.5rem;
+        }
+        .stat-label { font-size: 0.7rem; color: var(--on-surface-muted); text-transform: uppercase; }
+        .stat-value { font-size: 1.2rem; font-weight: 700; color: var(--secondary); }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <h1>VOICE LAB</h1>
+        <div class="stat-item">
+            <div class="stat-label">System Status</div>
+            <div class="stat-value" id="sys-status">Ready</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-label">Model Engine</div>
+            <div class="stat-value">Kokoro v1.0</div>
+        </div>
+        <div class="stat-item">
+            <div class="stat-label">Active Sandbox</div>
+            <div class="stat-value" id="sandbox-id">None</div>
+        </div>
+
+        <div style="margin-top: auto;">
+            <button class="secondary" style="width: 100%;" onclick="window.location.href='/'">Back to Mixer</button>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <div class="card">
+            <h2>1. Target Samples</h2>
+            <input type="file" id="file-input" multiple accept=".wav" style="display: none;">
+            <div class="drop-zone" id="drop-zone">
+                <i>📁</i>
+                <span id="drop-text">Drag & Drop high-quality WAV samples here</span><br>
+                <span style="font-size: 0.8rem; color: var(--on-surface-muted)">(Or click to browse)</span>
+            </div>
+            <div class="file-list" id="file-list"></div>
+        </div>
+
+        <div class="card">
+            <h2>2. Optimization Engine</h2>
+            <div class="controls">
+                <div class="input-group">
+                    <label>Reference Seed</label>
+                    <select id="seed-voice">
+                        <option value="auto">Auto (KNN)</option>
+                        <!-- Populated via JS -->
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label>Refinement Iterations</label>
+                    <input type="number" id="iterations" value="5" min="0" max="20">
+                </div>
+                <div class="input-group">
+                    <label>Learning Rate</label>
+                    <input type="number" id="lr" value="0.4" step="0.1" min="0.1" max="1.0">
+                </div>
+                <button class="primary" id="train-btn" disabled>Start Training</button>
+            </div>
+            
+            <div style="margin-top: 1.5rem;">
+                <label>Training Progress</label>
+                <div class="progress-container" style="background: var(--surface-variant); height: 12px; border-radius: 6px; margin: 10px 0; overflow: hidden; border: 1px solid var(--outline);">
+                    <div id="progress-bar" style="width: 0%; height: 100%; background: var(--secondary); transition: width 0.3s ease;"></div>
+                </div>
+                <div class="console" id="console">
+                    <div class="console-entry">Waiting for input samples...</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" id="preview-card" style="opacity: 0.5; pointer-events: none;">
+            <h2>3. Voice Verification</h2>
+            <div class="preview-area">
+                <textarea id="preview-text" placeholder="Type something to test the trained voice..."></textarea>
+                <div style="display: flex; gap: 1rem; align-items: center;">
+                    <button class="primary" id="preview-btn">Synthesize & Play</button>
+                    <div id="playing-status" style="font-size: 0.8rem; color: var(--secondary);"></div>
+                </div>
+            </div>
+
+            <div style="margin-top: 2rem; border-top: 1px solid var(--outline); padding-top: 1.5rem;">
+                <h2>4. Register Voice</h2>
+                <div class="controls">
+                    <div class="input-group">
+                        <label>Display Name</label>
+                        <input type="text" id="save-name" placeholder="e.g. My Custom Voice">
+                    </div>
+                    <div class="input-group">
+                        <label>Target Slot (Overwrite)</label>
+                        <select id="save-slot">
+                            <!-- Populated via JS -->
+                        </select>
+                    </div>
+                    <button class="primary" style="background: var(--secondary);" id="save-btn">Save Permanently</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const fileList = document.getElementById('file-list');
+        const trainBtn = document.getElementById('train-btn');
+        const consoleEl = document.getElementById('console');
+        const previewCard = document.getElementById('preview-card');
+        const previewBtn = document.getElementById('preview-btn');
+        const saveBtn = document.getElementById('save-btn');
+        const saveSlot = document.getElementById('save-slot');
+        const seedVoice = document.getElementById('seed-voice');
+        
+        let selectedFiles = [];
+
+        function log(msg, color='#00ff00') {
+            const div = document.createElement('div');
+            div.className = 'console-entry';
+            const time = new Date().toLocaleTimeString();
+            div.innerHTML = `<span class="console-time">[${time}]</span> <span style="color: ${color}">${msg}</span>`;
+            consoleEl.appendChild(div);
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+
+        // File Input Fallback
+        dropZone.onclick = () => fileInput.click();
+        fileInput.onchange = () => handleFiles(fileInput.files);
+
+        // Drag & Drop
+        dropZone.ondragover = (e) => { 
+            e.preventDefault(); 
+            e.stopPropagation();
+            dropZone.classList.add('hover'); 
+        };
+        dropZone.ondragleave = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('hover');
+        };
+        dropZone.ondrop = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('hover');
+            log(`Dropped ${e.dataTransfer.files.length} items`);
+            handleFiles(e.dataTransfer.files);
+        };
+
+        function handleFiles(files) {
+            const wavs = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.wav'));
+            if (wavs.length === 0 && files.length > 0) {
+                log("No .wav files detected. Please provide WAV audio.", "#ff4081");
+                return;
+            }
+
+            wavs.forEach(f => {
+                if (!selectedFiles.find(sf => sf.name === f.name)) {
+                    selectedFiles.push(f);
+                    const item = document.createElement('div');
+                    item.className = 'file-item';
+                    item.innerHTML = `<span>${f.name} (${(f.size/1024/1024).toFixed(2)} MB)</span><button class="secondary" style="padding: 2px 8px; font-size: 0.7rem;" onclick="removeFile('${f.name}')">×</button>`;
+                    fileList.appendChild(item);
+                    log(`Added: ${f.name}`);
+                }
+            });
+            trainBtn.disabled = selectedFiles.length === 0;
+        }
+
+        window.removeFile = (name) => {
+            selectedFiles = selectedFiles.filter(f => f.name !== name);
+            fileList.innerHTML = '';
+            selectedFiles.forEach(f => {
+                const item = document.createElement('div');
+                item.className = 'file-item';
+                item.innerHTML = `<span>${f.name}</span><button class="secondary" style="padding: 2px 8px; font-size: 0.7rem;" onclick="removeFile('${f.name}')">×</button>`;
+                fileList.appendChild(item);
+            });
+            trainBtn.disabled = selectedFiles.length === 0;
+        };
+
+        // Training
+        trainBtn.onclick = async () => {
+            trainBtn.disabled = true;
+            document.getElementById('progress-bar').style.width = '0%';
+            log("Initializing refinement loop...");
+            
+            const formData = new FormData();
+            selectedFiles.forEach(f => formData.append('audio', f));
+            formData.append('iterations', document.getElementById('iterations').value);
+            formData.append('lr', document.getElementById('lr').value);
+            formData.append('seed', seedVoice.value);
+
+            try {
+                const response = await fetch('/api/trainer/process', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let partialLine = '';
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = (partialLine + chunk).split('\n');
+                    partialLine = lines.pop(); // Re-add the last partial line if it was split
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        
+                        // Handle result line
+                        if (line.startsWith('RESULT:')) {
+                            const result = JSON.parse(line.substring(7));
+                            log("Training complete!", "#03dac6");
+                            previewCard.style.opacity = '1';
+                            previewCard.style.pointerEvents = 'all';
+                            document.getElementById('sandbox-id').textContent = result.voice_id;
+                            document.getElementById('progress-bar').style.width = '100%';
+                            continue;
+                        }
+
+                        // Parse Progress
+                        const iterMatch = line.match(/Refinement iteration (\d+)\/(\d+)/);
+                        if (iterMatch) {
+                            const current = parseInt(iterMatch[1]);
+                            const total = parseInt(iterMatch[2]);
+                            const pct = 5 + (current / total) * 90; // Start at 5%, go to 95%
+                            document.getElementById('progress-bar').style.width = pct + '%';
+                        }
+                        
+                        // Log parsing
+                        if (line.includes('Feature Error Norm')) {
+                            log(line, "var(--on-surface-muted)"); // Neutral color for metrics
+                        } else if (line.toLowerCase().includes('error') || line.toLowerCase().includes('fail')) {
+                            log(line, "#ff4081"); // Red for real errors
+                        } else if (line.includes('iteration')) {
+                            log(line, "var(--secondary)"); // Teal for iterations
+                        } else {
+                            log(line);
+                        }
+                    }
+                }
+            } catch (e) {
+                log("Network error: " + e.message, "#ff4081");
+            }
+            trainBtn.disabled = false;
+        };
+
+        // Preview
+        let audioCtx;
+        previewBtn.onclick = async () => {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            const text = document.getElementById('preview-text').value || "This is my new trained voice testing audio performance.";
+            
+            log(`Synthesizing preview...`);
+            previewBtn.disabled = true;
+            
+            // Note: We use the same 'mix_request' architecture but point to the sandbox
+            // Or we use the standard synth with model='sandbox_0'
+            const socket = new WebSocket(`ws://${location.host}/stream`);
+            socket.binaryType = 'arraybuffer';
+            
+            socket.onopen = () => {
+                socket.send(JSON.stringify({
+                    text: text,
+                    model: "sandbox_0",
+                    length_scale: 1.0
+                }));
+            };
+
+            let audioData = [];
+            socket.onmessage = async (e) => {
+                if (typeof e.data === 'string') {
+                    const meta = JSON.parse(e.data);
+                    if (meta.type === 'end') {
+                        playAudio(audioData);
+                        previewBtn.disabled = false;
+                        socket.close();
+                    }
+                } else {
+                    audioData.push(new Int16Array(e.data));
+                }
+            };
+        };
+
+        function playAudio(chunks) {
+            const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+            const buffer = audioCtx.createBuffer(1, totalLen, 24000);
+            const channel = buffer.getChannelData(0);
+            let offset = 0;
+            chunks.forEach(c => {
+                for (let i = 0; i < c.length; i++) channel[offset++] = c[i] / 32768;
+            });
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioCtx.destination);
+            source.start();
+        }
+
+        // Save
+        saveBtn.onclick = async () => {
+            const name = document.getElementById('save-name').value;
+            const slot = saveSlot.value;
+            if (!name) { alert("Please provide a voice name"); return; }
+            
+            log(`Saving voice '${name}' to slot '${slot}'...`);
+            const res = await fetch('/api/trainer/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, slot })
+            });
+            const result = await res.json();
+            if (result.status === 'ok') {
+                log("Voice saved and registered successfully!");
+                alert("Voice saved!");
+            }
+        };
+
+        // Init
+        async function fetchModels() {
+            // Check feature config
+            try {
+                const cfgRes = await fetch('/api/config');
+                const cfg = await cfgRes.json();
+                if (!cfg.trainer_enabled) {
+                    document.getElementById('sys-status').textContent = "Lite Mode";
+                    document.getElementById('sys-status').style.color = "var(--primary)";
+                    
+                    // Hide trainer cards
+                    const cards = document.querySelectorAll('.card');
+                    cards[0].style.display = 'none'; // Target Samples
+                    cards[1].style.display = 'none'; // Optimization Engine
+                    
+                    // Show message in preview card
+                    const previewHeader = document.querySelector('#preview-card h2');
+                    previewHeader.textContent = "Experimental Voice Mapper Disabled";
+                    previewHeader.style.color = "var(--accent)";
+                    
+                    log("Voice Mapper is disabled. Python dependency skipped.", "var(--accent)");
+                }
+            } catch (e) {
+                console.warn("Failed to fetch feature config", e);
+            }
+
+            const res = await fetch('/models');
+            const models = await res.json();
+            
+            // Populate Target Slots
+            saveSlot.innerHTML = '';
+            models.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                saveSlot.appendChild(opt);
+            });
+
+            // Populate Reference Seeds
+            const currentSeed = seedVoice.value;
+            seedVoice.innerHTML = '<option value="auto">Auto (KNN)</option>';
+            models.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m;
+                opt.textContent = m;
+                seedVoice.appendChild(opt);
+            });
+            seedVoice.value = currentSeed || "auto";
+        }
+        fetchModels();
+    </script>
+</body>
+</html>

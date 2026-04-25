@@ -1,0 +1,1506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kokoro TTS Diagnostic</title>
+    <style>
+        :root {
+            --primary: #bb86fc;
+            --secondary: #03dac6;
+            --background: #121212;
+            --surface: #1e1e1e;
+            --surface-variant: #2d2d2d;
+            --on-surface: #ffffff;
+            --on-surface-medium: #b3b3b3;
+            --on-primary: #000000;
+            --outline: #444444;
+            --glass: rgba(255, 255, 255, 0.05);
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--background);
+            color: var(--on-surface);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .header {
+            padding: 1rem 2rem;
+            background: var(--surface);
+            border-bottom: 1px solid var(--outline);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .visualizer-card {
+            background: linear-gradient(135deg, #1e1e1e 0%, #121212 100%);
+            height: 120px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .highlight-card {
+            background: var(--surface-variant);
+            border-left: 4px solid var(--primary);
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            font-size: 1.1rem;
+            font-weight: 500;
+            text-align: center;
+            transition: all 0.3s ease;
+        }
+
+        .highlight-text {
+            color: var(--on-surface);
+            opacity: 0.5;
+        }
+
+        .highlight-text.active {
+            color: var(--primary);
+            opacity: 1;
+            text-shadow: 0 0 10px rgba(187, 134, 252, 0.3);
+        }
+
+        .header h1 {
+            font-size: 1.25rem;
+            color: var(--primary);
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .badge {
+            background: var(--surface-variant);
+            color: var(--primary);
+            padding: 0.2rem 0.6rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .main {
+            flex: 1;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            max-width: 900px;
+            margin: 0 auto;
+            width: 100%;
+            overflow-y: auto;
+        }
+
+        .card {
+            background: var(--surface);
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid var(--outline);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .field-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--on-surface-medium);
+            text-transform: uppercase;
+        }
+
+        select, textarea {
+            background: var(--surface-variant);
+            border: 1px solid var(--outline);
+            color: var(--on-surface);
+            padding: 0.75rem;
+            border-radius: 8px;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        select:focus, textarea:focus {
+            border-color: var(--primary);
+        }
+
+        input[type=range] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            background: transparent;
+            margin: 0.5rem 0;
+        }
+
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            background: var(--outline);
+            border-radius: 2px;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: var(--primary);
+            margin-top: -6px;
+            cursor: pointer;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+        }
+
+        button.primary {
+            background: var(--primary);
+            color: var(--on-primary);
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.1s, opacity 0.2s;
+        }
+
+        button.primary:hover { opacity: 0.9; transform: translateY(-1px); }
+        button.primary:active { transform: translateY(0); }
+        button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .logs {
+            background: #000;
+            color: #00ff00;
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem;
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--outline);
+            height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        .log-entry { margin-bottom: 0.25rem; }
+        .log-time { color: #888; margin-right: 0.5rem; }
+        .log-error { color: #ff5252; }
+
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: var(--on-surface-medium);
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ff5252;
+            box-shadow: 0 0 5px #ff5252;
+        }
+
+        .dot.online { background: #03dac6; box-shadow: 0 0 5px #03dac6; }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .stat-card {
+            background: var(--surface-variant);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px solid var(--outline);
+        }
+
+        .stat-value {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--secondary);
+            margin-bottom: 0.2rem;
+        }
+
+        .stat-label {
+            font-size: 0.7rem;
+            color: var(--on-surface-medium);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        button.secondary {
+            background: transparent;
+            color: #ff5252;
+            border: 1px solid #ff5252;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button.secondary:hover {
+            background: rgba(255, 82, 82, 0.1);
+        }
+
+        button.secondary:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        /* Mixer Styles */
+        .mixer-card {
+            border-top: 4px solid var(--secondary);
+        }
+        .mixer-pool {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+            gap: 0.5rem;
+            max-height: 150px;
+            overflow-y: auto;
+            background: var(--surface-variant);
+            padding: 0.75rem;
+            border-radius: 8px;
+            border: 1px solid var(--outline);
+            margin-bottom: 1rem;
+        }
+        .pool-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.75rem;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .mix-sliders {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+        .mix-row {
+            background: rgba(255,255,255,0.03);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            display: grid;
+            grid-template-columns: 80px 1fr 40px;
+            align-items: center;
+            gap: 1rem;
+        }
+        .eq-bar:hover { opacity: 1; }
+
+        /* SVG EQ Styles */
+        .eq-row {
+            background: rgba(255,255,255,0.03);
+            padding: 1.2rem;
+            border-radius: 12px;
+            margin-bottom: 1.2rem;
+            border: 1px solid rgba(255,255,255,0.05);
+            transition: border-color 0.3s;
+        }
+        .eq-row:hover {
+            border-color: rgba(var(--secondary-rgb), 0.3);
+        }
+        .eq-svg-container {
+            position: relative;
+            width: 100%;
+            height: 100px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            margin-top: 0.8rem;
+            box-shadow: inset 0 2px 10px rgba(0,0,0,0.5);
+            overflow: hidden;
+        }
+        .eq-svg {
+            width: 100%;
+            height: 100%;
+            overflow: visible;
+        }
+        .eq-path {
+            fill: none;
+            stroke: var(--secondary);
+            stroke-width: 3;
+            filter: drop-shadow(0 0 5px var(--secondary));
+            pointer-events: none;
+        }
+        .eq-handle {
+            fill: #fff;
+            stroke: rgba(255,255,255,0.3);
+            stroke-width: 1;
+            cursor: pointer;
+            transition: r 0.1s, fill 0.1s, stroke 0.1s;
+        }
+        .eq-handle.highlight { 
+            fill: var(--primary);
+            stroke: var(--primary);
+            stroke-width: 2;
+            r: 6; 
+            filter: drop-shadow(0 0 5px var(--primary));
+        }
+        .eq-hitbox {
+            fill: transparent;
+            cursor: ns-resize;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1><span class="badge">Kokoro TTS</span> Diagnostic</h1>
+        <div class="status-bar">
+            <span>Uptime: <span id="uptime">0s</span></span>
+            <div id="status-dot" class="dot"></div>
+            <span id="status-text">Disconnected</span>
+        </div>
+    </div>
+
+    <div class="main">
+        <!-- Synthesizer Module -->
+        <div id="synthModule">
+            <div class="card">
+                <div class="card visualizer-card">
+                    <canvas id="visualizer"></canvas>
+                </div>
+
+                <div class="card highlight-card" id="highlightArea" style="display:none;">
+                    <div class="highlight-text" id="currentText">Waiting for audio...</div>
+                </div>
+
+                <div class="form-grid">
+                    <div class="field-group">
+                        <label>Voice Model</label>
+                        <div style="display: flex; gap: 10px;">
+                            <select id="model-select" style="flex-grow:1;">
+                                <option value="">Loading models...</option>
+                            </select>
+                            <button class="primary" id="openMixerBtn" style="padding: 0.5rem 1rem; font-size: 0.8rem; background: var(--secondary); color: #000;">🔬 Mixer</button>
+                        </div>
+                    </div>
+                    <div class="field-group">
+                        <label>Mode</label>
+                        <select id="mode-select">
+                            <option value="http">HTTP POST (Standard)</option>
+                            <option value="ws">WebSocket (Streaming)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="form-grid" style="grid-template-columns: 1fr;">
+                    <div class="field-group">
+                        <label for="lengthScale">Speaking Speed (<span id="lengthScaleVal">1.0</span>)</label>
+                        <input type="range" id="lengthScale" min="0.25" max="3.0" step="0.05" value="1.0">
+                    </div>
+                </div>
+
+                <div class="field-group" style="margin-bottom: 1rem;">
+                    <label>Text Input</label>
+                    <textarea id="text-input" placeholder="Type something for Kokoro to say..."></textarea>
+                </div>
+
+                <div class="actions">
+                    <div id="latency-display" style="flex-grow: 1; font-size: 0.85rem; color: var(--secondary);"></div>
+                    <button class="secondary" id="downloadBtn" disabled>Download</button>
+                    <button class="secondary" id="stopBtn" disabled>Stop</button>
+                    <button class="primary" id="synthBtn" disabled>Synthesize</button>
+                </div>
+                <div style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+                    <input type="checkbox" id="annotatedBtn" style="width:auto;">
+                    <label for="annotatedBtn" style="margin:0; cursor:pointer;">Enable Annotated Mode (Live Highlight)</label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Voice Mixer Module -->
+        <div id="mixerModule" style="display:none;">
+            <div class="card mixer-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                    <h2 style="margin:0; font-size: 1.1rem; color: var(--secondary); display: flex; align-items: center; gap: 8px;">
+                        🔬 Voice Embedding Mixer
+                    </h2>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <input type="checkbox" id="livePreviewCheck" style="width:auto;">
+                        <label for="livePreviewCheck" style="font-size: 0.7rem; margin:0; cursor:pointer; opacity:0.8;">Live Preview</label>
+                        <button class="secondary" id="resetMixerBtn" style="padding: 0.4rem 0.8rem; font-size: 0.75rem;">Reset Mixer</button>
+                        <button class="primary" id="backToSynthBtn" style="padding: 0.4rem 0.8rem; font-size: 0.75rem; background: var(--primary); color: #000;">⬅️ Back</button>
+                    </div>
+                </div>
+                
+                <label>1. Select Voices to Pool</label>
+                <div class="mixer-pool" id="mixerPool">
+                    <!-- Populated via JS -->
+                </div>
+
+                <div id="activeMixSection" style="display:none;">
+                    <div id="weightSection">
+                        <label>2. Proportional Weighting</label>
+                        <div class="mix-sliders" id="mixSliders">
+                            <!-- Populated via JS -->
+                        </div>
+                    </div>
+
+                    <div class="form-grid">
+                        <div class="field-group">
+                            <label>Interpolation Method</label>
+                            <select id="mixMethod">
+                                <option value="linear">Linear Combination</option>
+                                <option value="slerp">SLERP (Hyperspherical)</option>
+                                <option value="eq">Graphic EQ (Bin-Mapped)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div id="eqSection" style="display:none;">
+                        <label>3. Per-Voice Curve Sculpting (510 Dim Mapping)</label>
+                        <div id="perVoiceEqArea">
+                            <!-- SVG Editors injected here in EQ mode -->
+                        </div>
+                    </div>
+
+                    <div class="actions" style="margin-top: 1.5rem; justify-content: flex-end;">
+                        <div class="field-group" style="flex-grow: 1; margin-right: 1rem;">
+                            <input type="text" id="customName" placeholder="New Voice Name (e.g. 'Deep Husky')" style="background: var(--surface-variant); border: 1px solid var(--outline); color: #fff; padding: 0.5rem; border-radius: 4px;">
+                        </div>
+                        <div class="field-group" style="margin-right: 1rem;">
+                            <select id="slotSelect" style="padding: 0.5rem; font-size: 0.75rem;">
+                                <!-- Populated with original voices -->
+                            </select>
+                        </div>
+                        <button class="secondary" id="previewMixBtn">Preview Mix</button>
+                        <button class="primary" id="saveMixBtn">Save to Slot</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats-grid" id="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value" id="stat-mem">-</div>
+                <div class="stat-label">Memory Alloc</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-cpu">-</div>
+                <div class="stat-label">GoRoutines</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-cache">-</div>
+                <div class="stat-label">Model Cache</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-active">-</div>
+                <div class="stat-label">Active Model</div>
+            </div>
+        </div>
+
+        <div class="field-group">
+            <label>Execution Logs</label>
+            <div id="log-box" class="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        const modeSelect = document.getElementById('mode-select');
+        const annotatedBtn = document.getElementById('annotatedBtn');
+        const synthBtn = document.getElementById('synthBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const textInput = document.getElementById('text-input');
+        const canvas = document.getElementById('visualizer');
+        const ctx_canvas = canvas.getContext('2d');
+        const highlightArea = document.getElementById('highlightArea');
+        const currentText = document.getElementById('currentText');
+        const logBox = document.getElementById('log-box');
+        const modelSelect = document.getElementById('model-select');
+        const latencyDisplay = document.getElementById('latency-display');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const uptimeSpan = document.getElementById('uptime');
+        
+        const lengthScaleInput = document.getElementById('lengthScale');
+        const lengthScaleVal = document.getElementById('lengthScaleVal');
+
+        const statMem = document.getElementById('stat-mem');
+        const statCpu = document.getElementById('stat-cpu');
+        const statCache = document.getElementById('stat-cache');
+        const statActive = document.getElementById('stat-active');
+        
+        // Mixer Elements
+        const mixerPool = document.getElementById('mixerPool');
+        const mixSliders = document.getElementById('mixSliders');
+        const activeMixSection = document.getElementById('activeMixSection');
+        const weightSection = document.getElementById('weightSection');
+        const mixMethod = document.getElementById('mixMethod');
+        const eqSection = document.getElementById('eqSection');
+        const perVoiceEqArea = document.getElementById('perVoiceEqArea');
+        const previewMixBtn = document.getElementById('previewMixBtn');
+        const saveMixBtn = document.getElementById('saveMixBtn');
+        const customName = document.getElementById('customName');
+        const slotSelect = document.getElementById('slotSelect');
+        const synthModule = document.getElementById('synthModule');
+        const mixerModule = document.getElementById('mixerModule');
+        const openMixerBtn = document.getElementById('openMixerBtn');
+        const backToSynthBtn = document.getElementById('backToSynthBtn');
+        const resetMixerBtn = document.getElementById('resetMixerBtn');
+        const livePreviewCheck = document.getElementById('livePreviewCheck');
+
+        const POINTS_COUNT = 20;
+
+        let poolSelection = new Set();
+        let poolWeights = {}; // voiceName -> weight(0-100)
+        let poolEqCurves = {}; // voiceName -> [20] (val 0-100)
+        let poolInterpCurves = {}; // voiceName -> [510] pre-calculated floats
+        let originalVoices = []; // To hold ID-to-Display mappings
+
+        function upscaleEqCurve(oldCurve) {
+            if (!oldCurve || oldCurve.length === POINTS_COUNT) return oldCurve;
+            const newCurve = new Array(POINTS_COUNT);
+            for (let i = 0; i < POINTS_COUNT; i++) {
+                const oldIdx = i * (oldCurve.length - 1) / (POINTS_COUNT - 1);
+                const i1 = Math.floor(oldIdx);
+                const i2 = Math.min(oldCurve.length - 1, i1 + 1);
+                const frac = oldIdx - i1;
+                newCurve[i] = oldCurve[i1] * (1 - frac) + oldCurve[i2] * frac;
+            }
+            return newCurve;
+        }
+
+        function saveMixerState() {
+            localStorage.setItem('kokoro_mixer_pool', JSON.stringify(Array.from(poolSelection)));
+            localStorage.setItem('kokoro_mixer_weights', JSON.stringify(poolWeights));
+            localStorage.setItem('kokoro_mixer_method', mixMethod.value);
+            localStorage.setItem('kokoro_mixer_pool_eq', JSON.stringify(poolEqCurves));
+            localStorage.setItem('kokoro_mixer_live', livePreviewCheck.checked);
+        }
+
+        function loadMixerState() {
+            try {
+                const pool = JSON.parse(localStorage.getItem('kokoro_mixer_pool') || '[]');
+                poolSelection = new Set(pool);
+                poolWeights = JSON.parse(localStorage.getItem('kokoro_mixer_weights') || '{}');
+                mixMethod.value = localStorage.getItem('kokoro_mixer_method') || 'linear';
+                const rawEq = JSON.parse(localStorage.getItem('kokoro_mixer_pool_eq') || '{}');
+                livePreviewCheck.checked = localStorage.getItem('kokoro_mixer_live') === 'true';
+
+                // Migrate/Load curves
+                Object.keys(rawEq).forEach(v => {
+                    poolEqCurves[v] = upscaleEqCurve(rawEq[v]);
+                    recalculateBinWeights(v);
+                });
+                
+                // Sync UI visibility
+                eqSection.style.display = mixMethod.value === 'eq' ? 'block' : 'none';
+                weightSection.style.display = mixMethod.value === 'eq' ? 'none' : 'block';
+                updateMixSliders();
+            } catch(e) {}
+        }
+
+        openMixerBtn.onclick = () => {
+            synthModule.style.display = 'none';
+            mixerModule.style.display = 'block';
+        };
+
+        backToSynthBtn.onclick = () => {
+            mixerModule.style.display = 'none';
+            synthModule.style.display = 'block';
+        };
+
+        resetMixerBtn.onclick = () => {
+            if (confirm("Reset all mixer selections and weights?")) {
+                poolSelection.clear();
+                poolWeights = {};
+                poolEqCurves = {};
+                saveMixerState();
+                fetchModels(); 
+                updateMixSliders();
+            }
+        };
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function log(msg, isError = false) {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${isError ? 'log-error' : ''}`;
+            const time = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="log-time">[${time}]</span> ${msg}`;
+            logBox.appendChild(entry);
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // Initialize models
+        async function fetchModels() {
+            try {
+                const res = await fetch('/models');
+                const models = await res.json();
+                originalVoices = models; // Keep track of current names
+                
+                const statusRes = await fetch('/status');
+                const status = await statusRes.json();
+
+                // 1. Update Main Predictor Model Select
+                const savedModel = localStorage.getItem('kokoro_last_model');
+                modelSelect.innerHTML = '';
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    if (savedModel) {
+                        if (m === savedModel) opt.selected = true;
+                    } else if (m === status.active_model) {
+                        opt.selected = true;
+                    }
+                    modelSelect.appendChild(opt);
+                });
+
+                // 2. Populate Mixer Pool & Slot Select
+                mixerPool.innerHTML = '';
+                slotSelect.innerHTML = '';
+                models.forEach(m => {
+                    // Pool
+                    const div = document.createElement('div');
+                    div.className = 'pool-item';
+                    const chk = document.createElement('input');
+                    chk.type = 'checkbox';
+                    chk.id = `pool_${m}`;
+                    chk.onchange = () => togglePoolVoice(m, chk.checked);
+                    
+                    const lbl = document.createElement('label');
+                    lbl.htmlFor = chk.id;
+                    lbl.textContent = m;
+                    lbl.style.cursor = 'pointer';
+                    
+                    div.appendChild(chk);
+                    div.appendChild(lbl);
+                    mixerPool.appendChild(div);
+
+                    // Slot Select - Show remapped name if available
+                    const opt = document.createElement('option');
+                    // We need to find if this model name 'm' is one of the original voices 
+                    // that has been remapped. 
+                    // Note: 'm' in 'models' is already remapped if it's a custom mix.
+                    // But 'slotSelect' needs to point to the INTERNAL name for the API.
+                    
+                    // Actually, the server returns remapped names in /models.
+                    // I'll check if the original internal name is known.
+                    opt.value = m; 
+                    opt.textContent = `Overwrite Slot: ${m}`;
+                    slotSelect.appendChild(opt);
+                });
+
+                log(`Fetched ${models.length} available models.`);
+
+                loadMixerState();
+
+                // Check pool checkboxes based on loaded state
+                poolSelection.forEach(v => {
+                    const chk = document.getElementById(`pool_${v}`);
+                    if (chk) chk.checked = true;
+                });
+
+                if (savedModel && savedModel !== status.active_model) {
+                    await syncModel(savedModel);
+                }
+            } catch (e) {
+                log(`Failed to fetch models: ${e.message}`, true);
+            }
+        }
+
+        function togglePoolVoice(voiceName, checked) {
+            if (checked) {
+                poolSelection.add(voiceName);
+                if (poolWeights[voiceName] === undefined) poolWeights[voiceName] = 50;
+                if (!poolEqCurves[voiceName]) poolEqCurves[voiceName] = new Array(POINTS_COUNT).fill(50);
+                recalculateBinWeights(voiceName);
+            } else {
+                poolSelection.delete(voiceName);
+            }
+            saveMixerState();
+            updateMixSliders();
+        }
+
+        function recalculateBinWeights(voiceName, handleIdx = null) {
+            if (!poolEqCurves[voiceName]) return;
+            const curve = poolEqCurves[voiceName];
+            if (!poolInterpCurves[voiceName]) poolInterpCurves[voiceName] = new Float32Array(510);
+            const interp = poolInterpCurves[voiceName];
+
+            const binsPerPoint = 510 / POINTS_COUNT;
+            const neighborhood = Math.ceil(binsPerPoint * 2);
+
+            const startB = (handleIdx === null) ? 0 : Math.max(0, Math.floor(handleIdx * binsPerPoint - neighborhood));
+            const endB = (handleIdx === null) ? 510 : Math.min(510, Math.ceil(handleIdx * binsPerPoint + neighborhood));
+
+            for (let b = startB; b < endB; b++) {
+                const hIdxRaw = b / binsPerPoint;
+                const hIdx = Math.floor(hIdxRaw);
+                const frac = hIdxRaw - hIdx;
+                const val = curve[hIdx] * (1-frac) + (curve[Math.min(POINTS_COUNT-1, hIdx+1)] || curve[POINTS_COUNT-1]) * frac;
+                interp[b] = val / 100;
+            }
+        }
+
+        function updateMixSliders() {
+            mixSliders.innerHTML = '';
+            perVoiceEqArea.innerHTML = '';
+            if (poolSelection.size === 0) {
+                activeMixSection.style.display = 'none';
+                return;
+            }
+            activeMixSection.style.display = 'block';
+
+            const isEqMode = mixMethod.value === 'eq';
+            eqSection.style.display = isEqMode ? 'block' : 'none';
+            weightSection.style.display = isEqMode ? 'none' : 'block';
+
+            poolSelection.forEach(v => {
+                if (isEqMode) {
+                    renderSvgEqRow(v);
+                } else {
+                    renderSliderRow(v);
+                }
+            });
+        }
+
+        function renderSliderRow(voiceName) {
+            const row = document.createElement('div');
+            row.className = 'mix-row';
+            
+            const lbl = document.createElement('span');
+            lbl.textContent = voiceName;
+            lbl.style.fontSize = '0.7rem';
+            lbl.style.fontWeight = 'bold';
+
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = 0;
+            slider.max = 100;
+            slider.value = poolWeights[voiceName] || 50;
+            slider.oninput = () => { 
+                poolWeights[voiceName] = parseFloat(slider.value);
+                document.getElementById(`val_${voiceName}`).textContent = slider.value + '%';
+                saveMixerState();
+            };
+
+            const valComp = document.createElement('span');
+            valComp.id = `val_${voiceName}`;
+            valComp.textContent = (poolWeights[voiceName] || 50) + '%';
+            valComp.style.fontSize = '0.7rem';
+            valComp.style.color = 'var(--secondary)';
+
+            row.appendChild(lbl);
+            row.appendChild(slider);
+            row.appendChild(valComp);
+            mixSliders.appendChild(row);
+        }
+
+        function renderSvgEqRow(voiceName) {
+            const row = document.createElement('div');
+            row.className = 'eq-row';
+            
+            const title = document.createElement('div');
+            title.style.display = 'flex';
+            title.style.justifyContent = 'space-between';
+            title.innerHTML = `<span style="font-size:0.75rem; font-weight:bold;">${voiceName}</span><span style="font-size:0.6rem; opacity:0.5;">SCULPT MODE [SCROLL TO SHIFT]</span>`;
+            row.appendChild(title);
+
+            const container = document.createElement('div');
+            container.className = 'eq-svg-container';
+            const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            svg.setAttribute("class", "eq-svg");
+            svg.setAttribute("viewBox", "0 0 400 100");
+            svg.setAttribute("preserveAspectRatio", "none");
+
+            const curveData = poolEqCurves[voiceName];
+            const handleCircles = [];
+            const hitboxCircles = [];
+
+            const updatePath = () => {
+                const step = 400 / (POINTS_COUNT - 1);
+                let d = `M 0 ${100 - curveData[0]}`;
+                for (let i = 0; i < POINTS_COUNT - 1; i++) {
+                    const x1 = i * step + step/2;
+                    const x2 = (i + 1) * step;
+                    const y2 = 100 - curveData[i+1];
+                    d += ` C ${x1} ${100 - curveData[i]}, ${x1} ${y2}, ${x2} ${y2}`;
+                }
+                path.setAttribute("d", d);
+            };
+
+            const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+            path.setAttribute("class", "eq-path");
+            svg.appendChild(path);
+
+            for (let i = 0; i < POINTS_COUNT; i++) {
+                const x = i * (400 / (POINTS_COUNT - 1));
+                
+                const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+                handle.setAttribute("cx", x);
+                handle.setAttribute("cy", 100 - curveData[i]);
+                handle.setAttribute("r", "3");
+                handle.setAttribute("class", "eq-handle");
+                svg.appendChild(handle);
+                handleCircles.push(handle);
+
+                const hitbox = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+                hitbox.setAttribute("cx", x);
+                hitbox.setAttribute("cy", 100 - curveData[i]);
+                hitbox.setAttribute("r", "8");
+                hitbox.setAttribute("class", "eq-hitbox");
+                svg.appendChild(hitbox);
+                hitboxCircles.push(hitbox);
+                
+                hitbox.onmousedown = (e) => {
+                    e.preventDefault();
+                    const rect = svg.getBoundingClientRect();
+                    const moveListener = (me) => {
+                        const yPercent = 100 - ((me.clientY - rect.top) / rect.height * 100);
+                        const val = Math.max(0, Math.min(100, yPercent));
+                        curveData[i] = val;
+                        handle.setAttribute("cy", 100 - val);
+                        hitbox.setAttribute("cy", 100 - val);
+                        updatePath();
+                        
+                        poolEqCurves[voiceName][i] = val;
+                        recalculateBinWeights(voiceName, i);
+                    };
+                    const stop = () => {
+                        window.removeEventListener('mousemove', moveListener);
+                        saveMixerState();
+                        if (livePreviewCheck.checked) {
+                            sendMixRequest();
+                        }
+                    };
+                    window.addEventListener('mousemove', moveListener);
+                    window.addEventListener('mouseup', stop, {once:true});
+                };
+
+                const updateHighlights = (me) => {
+                    const rect = svg.getBoundingClientRect();
+                    const mouseX = me.clientX - rect.left;
+                    const nearestIdx = Math.round((mouseX / rect.width) * 19);
+                    
+                    handleCircles.forEach((circle, i) => {
+                        let shouldHighlight = false;
+                        if (me.ctrlKey) {
+                            shouldHighlight = true;
+                        } else if (me.shiftKey) {
+                            shouldHighlight = (i >= nearestIdx - 1 && i <= nearestIdx + 1);
+                        } else {
+                            shouldHighlight = (i === nearestIdx);
+                        }
+                        
+                        if (shouldHighlight) circle.classList.add('highlight');
+                        else circle.classList.remove('highlight');
+                    });
+                };
+
+                svg.onmousemove = updateHighlights;
+                svg.onmouseleave = () => {
+                    handleCircles.forEach(c => c.classList.remove('highlight'));
+                };
+            }
+
+            svg.onwheel = (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? -5 : 5;
+                const rect = svg.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                // Map screen X to viewBox X (400) and then to point index (0-19)
+                const nearestIdx = Math.round((mouseX / rect.width) * 19);
+
+                const applyChange = (idx) => {
+                    const newVal = Math.max(0, Math.min(100, curveData[idx] + delta));
+                    curveData[idx] = newVal;
+                    handleCircles[idx].setAttribute("cy", 100 - newVal);
+                    hitboxCircles[idx].setAttribute("cy", 100 - newVal);
+                    poolEqCurves[voiceName][idx] = newVal;
+                };
+
+                if (e.ctrlKey) {
+                    // Global shift
+                    curveData.forEach((_, i) => applyChange(i));
+                } else if (e.shiftKey) {
+                    // Range shift (3 points)
+                    for (let i = nearestIdx - 1; i <= nearestIdx + 1; i++) {
+                        if (i >= 0 && i < 20) applyChange(i);
+                    }
+                } else {
+                    // Single point shift
+                    if (nearestIdx >= 0 && nearestIdx < 20) applyChange(nearestIdx);
+                }
+
+                updatePath();
+                recalculateBinWeights(voiceName);
+                saveMixerState();
+                if (livePreviewCheck.checked) {
+                    sendMixRequest();
+                }
+            };
+
+            updatePath();
+            container.appendChild(svg);
+            row.appendChild(container); // Fix: append to row before appending row to area
+            perVoiceEqArea.appendChild(row);
+        }
+
+        mixMethod.onchange = () => {
+            updateMixSliders();
+            saveMixerState();
+        }
+
+        livePreviewCheck.onchange = saveMixerState;
+
+        async function sendMixRequest() {
+            const text = textInput.value.trim() || "Previewing the live mixture.";
+            const weights = {};
+            const binWeights = [];
+            const isEqMode = mixMethod.value === 'eq';
+
+            poolSelection.forEach(v => {
+                weights[v] = (poolWeights[v] || 50) / 100;
+                if (isEqMode) {
+                    binWeights.push(Array.from(poolInterpCurves[v]));
+                }
+            });
+
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                log("Live Preview mix_request sent...");
+                socket.send(JSON.stringify({
+                    type: "mix_request",
+                    text,
+                    weights,
+                    method: mixMethod.value,
+                    bin_weights: binWeights
+                }));
+            } else {
+                log("Socket not ready for live preview", true);
+            }
+        }
+
+        previewMixBtn.onclick = async () => {
+            const text = textInput.value.trim() || "Previewing the new custom voice mixture.";
+            const weights = {};
+            const binWeights = [];
+            
+            const isEqMode = mixMethod.value === 'eq';
+
+            poolSelection.forEach(v => {
+                weights[v] = (poolWeights[v] || 50) / 100;
+                if (isEqMode) {
+                    binWeights.push(Array.from(poolInterpCurves[v]));
+                }
+            });
+
+            previewMixBtn.disabled = true;
+            log("Generating Mixer Preview...");
+            
+            try {
+                const res = await fetch('/api/mix/preview', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text,
+                        weights,
+                        method: mixMethod.value,
+                        bin_weights: isEqMode ? binWeights : []
+                    })
+                });
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                new Audio(url).play();
+                log("Preview Received.");
+            } catch (e) {
+                log("Mix Error: " + e.message, true);
+            } finally {
+                previewMixBtn.disabled = false;
+            }
+        };
+
+        saveMixBtn.onclick = async () => {
+            const name = customName.value.trim();
+            if(!name) return log("Please enter a custom name", true);
+            
+            const weights = {};
+            const binWeights = [];
+            const isEqMode = mixMethod.value === 'eq';
+
+            poolSelection.forEach(v => {
+                weights[v] = (poolWeights[v] || 50) / 100;
+                if (isEqMode) {
+                    binWeights.push(Array.from(poolInterpCurves[v]));
+                }
+            });
+
+            saveMixBtn.disabled = true;
+            log(`Saving Custom Voice: ${name}...`);
+
+            try {
+                const res = await fetch('/api/mix/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name,
+                        slot: slotSelect.value,
+                        weights,
+                        method: mixMethod.value,
+                        bin_weights: isEqMode ? binWeights : []
+                    })
+                });
+                if (res.ok) {
+                    log("Voice saved successfully!");
+                    fetchModels();
+                } else {
+                    log("Failed to save voice.", true);
+                }
+            } catch (e) {
+                log("Save Error: " + e.message, true);
+            } finally {
+                saveMixBtn.disabled = false;
+            }
+        };
+
+        async function syncModel(model) {
+            log(`Syncing model with server: ${model}...`);
+            try {
+                const res = await fetch('/models', {
+                    method: 'POST',
+                    body: JSON.stringify({ model })
+                });
+                if (res.ok) log(`Model synced successfully.`);
+                else log(`Failed to sync model.`, true);
+            } catch (e) {
+                log(`Error syncing model: ${e.message}`, true);
+            }
+        }
+
+        // Change model
+        modelSelect.addEventListener('change', () => {
+            const model = modelSelect.value;
+            localStorage.setItem('kokoro_last_model', model);
+            syncModel(model);
+        });
+
+        // Update health/uptime
+        async function updateHealth() {
+            try {
+                const hRes = await fetch('/health');
+                const health = await hRes.json();
+                
+                const sRes = await fetch('/status');
+                const status = await sRes.json();
+
+                uptimeSpan.textContent = Math.floor(health.uptime_seconds) + 's';
+                statusDot.className = 'dot online';
+                statusText.textContent = 'Engine Ready';
+
+                // Update Stats
+                statMem.textContent = formatBytes(health.memory_usage_bytes);
+                statCpu.textContent = health.goroutines;
+                statCache.textContent = `${status.cached_models.length} (${formatBytes(status.total_cache_size_estimate)})`;
+                statActive.textContent = status.active_model || 'None';
+
+            } catch (e) {
+                statusDot.className = 'dot';
+                statusText.textContent = 'Disconnected';
+            }
+        }
+        setInterval(updateHealth, 5000);
+
+        // Synthesis Logic
+        let audioCtx;
+        let socket = null;
+        let audioStartTime = 0;
+        let nextPlayTime = 0;
+        let pendingText = "";
+        let audioSegments = [];
+        let analyser = null;
+        let dataArray = null;
+        let animationId = null;
+        let activeSources = [];
+        let isStopped = false;
+        let currentAudioFrames = [];
+        let currentAudioBlobUrl = null;
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        function createWavBlob(framesArray, sampleRate) {
+            let totalLength = 0;
+            framesArray.forEach(f => totalLength += f.length);
+            const buffer = new ArrayBuffer(44 + totalLength * 2);
+            const view = new DataView(buffer);
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + totalLength * 2, true);
+            writeString(view, 8, 'WAVE');
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(view, 36, 'data');
+            view.setUint32(40, totalLength * 2, true);
+            let offset = 44;
+            for (let i = 0; i < framesArray.length; i++) {
+                const chunk = framesArray[i];
+                for (let j = 0; j < chunk.length; j++, offset += 2) {
+                    view.setInt16(offset, chunk[j], true);
+                }
+            }
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        downloadBtn.onclick = () => {
+            if (!currentAudioBlobUrl) return;
+            const a = document.createElement('a');
+            a.href = currentAudioBlobUrl;
+            a.download = 'kokoro-tts.wav';
+            a.click();
+        };
+
+        function stopAudio() {
+            log("Stopping and muting stream...");
+            isStopped = true;
+            activeSources.forEach(s => {
+                try { s.stop(); } catch(e) {}
+            });
+            activeSources = [];
+            audioSegments = [];
+            nextPlayTime = 0;
+            stopBtn.disabled = true;
+        }
+
+        stopBtn.onclick = stopAudio;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+                
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.connect(audioCtx.destination);
+                
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+                
+                startHighlightLoop();
+                startVisualizer();
+            }
+            return audioCtx;
+        }
+
+        function startVisualizer() {
+            if (animationId) return;
+
+            const draw = () => {
+                animationId = requestAnimationFrame(draw);
+                analyser.getByteFrequencyData(dataArray);
+
+                const width = canvas.width;
+                const height = canvas.height;
+                ctx_canvas.clearRect(0, 0, width, height);
+
+                const barWidth = (width / dataArray.length) * 2.5;
+                let barHeight;
+                let x = 0;
+
+                for (let i = 0; i < dataArray.length; i++) {
+                    barHeight = (dataArray[i] / 255) * height;
+
+                    // Gradient color based on height
+                    const hue = 260 + (dataArray[i] / 255) * 60; // Purple to Tealish
+                    ctx_canvas.fillStyle = `hsla(${hue}, 80%, 70%, 0.8)`;
+                    
+                    // Rounded bars
+                    ctx_canvas.beginPath();
+                    ctx_canvas.roundRect(x, height - barHeight, barWidth - 2, barHeight, [4, 4, 0, 0]);
+                    ctx_canvas.fill();
+
+                    x += barWidth + 1;
+                }
+            };
+            draw();
+        }
+
+        function startHighlightLoop() {
+            const update = () => {
+                const now = audioCtx.currentTime;
+                const active = audioSegments.find(s => now >= s.start && now < s.end);
+                if (active) {
+                    currentText.innerText = active.text;
+                    currentText.classList.add('active');
+                } else {
+                    currentText.classList.remove('active');
+                }
+                requestAnimationFrame(update);
+            };
+            requestAnimationFrame(update);
+        }
+
+        function connectWS() {
+            if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(`${protocol}//${window.location.host}/stream`);
+            socket.binaryType = 'arraybuffer';
+
+            socket.onopen = () => {
+                log("WebSocket Connected");
+                statusDot.className = 'dot online';
+                statusText.textContent = 'Engine Ready';
+                synthBtn.disabled = false;
+                updateHealth(); // Immediate update on connect
+            };
+
+            socket.onmessage = (event) => {
+                const ctx = initAudio();
+
+                // Handle Text Messages (JSON Metadata/Errors)
+                if (typeof event.data === 'string') {
+                    try {
+                        const data = JSON.parse(event.data);
+                        log(`WS Metadata: type=${data.type}`);
+                        if (data.error) {
+                            log(`Server Error: ${data.error}`, true);
+                            synthBtn.disabled = false;
+                            latencyDisplay.textContent = 'Error';
+                        } else if (data.type === 'text') {
+                            pendingText = data.text;
+                            log(`Metadata Captured: "${pendingText.substring(0, 15)}..."`);
+                        } else if (data.type === 'start' || (data.sampleRate && !data.text)) {
+                            isStopped = false;
+                            window.currentSampleRate = data.sampleRate || window.currentSampleRate;
+                            log(`New stream session started: ${window.currentSampleRate} Hz`);
+                        } else if (data.type === 'end') {
+                            log("Stream completed (End reached)");
+                            if (currentAudioFrames.length > 0) {
+                                const wavBlob = createWavBlob(currentAudioFrames, window.currentSampleRate || 24000);
+                                if (currentAudioBlobUrl) URL.revokeObjectURL(currentAudioBlobUrl);
+                                currentAudioBlobUrl = URL.createObjectURL(wavBlob);
+                                downloadBtn.disabled = false;
+                            }
+                        }
+                    } catch(e) {
+                        log(`Error parsing metadata: ${e.message}`, true);
+                        log(`Raw content: ${event.data.substring(0, 50)}...`, true);
+                    }
+                    return;
+                }
+
+                // Handle Binary Messages (PCM Audio Data)
+                if (isStopped) return;
+
+                const elapsed = Math.round(performance.now() - audioStartTime);
+                const data = event.data;
+                const pcmData = new Int16Array(data);
+                currentAudioFrames.push(pcmData);
+                
+                latencyDisplay.textContent = `Completed in ${elapsed}ms (WS)`;
+                log(`Success: Received audio stream chunk (${pcmData.length} samples).`);
+                const floatData = new Float32Array(pcmData.length);
+                for (let i = 0; i < pcmData.length; i++) {
+                    floatData[i] = pcmData[i] / 32768.0;
+                }
+
+                const sr = window.currentSampleRate || 24000;
+                const buffer = ctx.createBuffer(1, floatData.length, sr);
+                buffer.getChannelData(0).set(floatData);
+                
+                const source = ctx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(analyser); // Connect to analyser instead of direct destination
+
+                activeSources.push(source);
+                source.onended = () => {
+                    activeSources = activeSources.filter(s => s !== source);
+                    if (activeSources.length === 0) stopBtn.disabled = true;
+                };
+                stopBtn.disabled = false;
+                
+                // Use a precise playhead to schedule chunks gaplessly
+                const now = ctx.currentTime;
+                if (nextPlayTime < now) {
+                    nextPlayTime = now;
+                }
+                
+                source.start(nextPlayTime);
+                
+                // Track timing for highlight
+                if (pendingText) {
+                    log(`Highlight scheduled for: "${pendingText.substring(0, 20)}..." at T=${nextPlayTime.toFixed(2)}`);
+                    audioSegments.push({
+                        start: nextPlayTime,
+                        end: nextPlayTime + buffer.duration,
+                        text: pendingText
+                    });
+                    pendingText = ""; 
+                } else {
+                    log("Warning: Binary chunk received with no pending text metadata", true);
+                }
+
+                nextPlayTime += buffer.duration;
+                
+                synthBtn.disabled = false;
+            };
+
+            socket.onclose = () => {
+                log("WebSocket Disconnected. Reconnecting...", true);
+                statusDot.className = 'dot';
+                statusText.textContent = 'Reconnecting...';
+                synthBtn.disabled = true;
+                setTimeout(connectWS, 3000);
+            };
+
+            socket.onerror = (e) => {
+                log(`WebSocket error`, true);
+            };
+        }
+
+        synthBtn.onclick = async () => {
+            const text = textInput.value.trim();
+            if (!text) return log("Please enter text", true);
+            const mode = modeSelect.value;
+            const activeModelID = modelSelect.value;
+
+            synthBtn.disabled = true;
+            downloadBtn.disabled = true;
+            latencyDisplay.textContent = 'Synthesizing...';
+            audioStartTime = performance.now();
+            isStopped = false;
+            
+            currentAudioFrames = [];
+            if (currentAudioBlobUrl) {
+                URL.revokeObjectURL(currentAudioBlobUrl);
+                currentAudioBlobUrl = null;
+            }
+            
+            // Note: We don't reset nextPlayTime here if there's already active audio,
+            // unless the user explicitly clicks STOP. 
+            // However, for single-shot synthesis testing, resetting is usually cleaner.
+            if (activeSources.length === 0) {
+                nextPlayTime = 0;
+                audioSegments = [];
+            }
+            
+            window.currentSampleRate = 24000; // Reset default sample rate
+            pendingText = "";
+            
+            highlightArea.style.display = annotatedBtn.checked ? 'block' : 'none';
+            currentText.innerText = "Waiting for audio...";
+            
+            // Persist settings
+            localStorage.setItem('kokoro_last_text', text);
+            localStorage.setItem('kokoro_last_mode', mode);
+            localStorage.setItem('kokoro_last_annotated', annotatedBtn.checked);
+            localStorage.setItem('kokoro_last_length_scale', lengthScaleInput.value);
+
+            const ctx = initAudio();
+            if (ctx.state === 'suspended') {
+                ctx.resume();
+            }
+
+            if (mode === 'http') {
+                try {
+                    const res = await fetch('/tts', {
+                        method: 'POST',
+                        body: JSON.stringify({ 
+                            text,
+                            model: activeModelID,
+                            length_scale: parseFloat(lengthScaleInput.value)
+                        })
+                    });
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    
+                    if (currentAudioBlobUrl) URL.revokeObjectURL(currentAudioBlobUrl);
+                    currentAudioBlobUrl = url;
+                    downloadBtn.disabled = false;
+                    
+                    const audio = new Audio(url);
+                    audio.play();
+                    stopBtn.disabled = false;
+                    audio.onended = () => { stopBtn.disabled = true; };
+                    
+                    const latency = Math.round(performance.now() - audioStartTime);
+                    latencyDisplay.textContent = `Completed in ${latency}ms (HTTP)`;
+                    log(`HTTP Success: Received ${blob.size} bytes.`);
+                } catch (e) {
+                    log(`HTTP Error: ${e.message}`, true);
+                } finally {
+                    synthBtn.disabled = false;
+                }
+            } else {
+                // WebSocket Streaming Mode
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ 
+                        text, 
+                        model: activeModelID,
+                        annotated: annotatedBtn.checked,
+                        length_scale: parseFloat(lengthScaleInput.value)
+                    }));
+                } else {
+                    log("WebSocket not connected", true);
+                    synthBtn.disabled = false;
+                }
+            }
+        };
+
+        // Initial Load
+        const lastText = localStorage.getItem('kokoro_last_text');
+        if (lastText) textInput.value = lastText;
+
+        const lastMode = localStorage.getItem('kokoro_last_mode');
+        if (lastMode) modeSelect.value = lastMode;
+
+        const lastAnnotated = localStorage.getItem('kokoro_last_annotated');
+        if (lastAnnotated !== null) annotatedBtn.checked = lastAnnotated === 'true';
+
+        // Load voice parameters
+        const lastLS = localStorage.getItem('kokoro_last_length_scale');
+        if (lastLS) { lengthScaleInput.value = lastLS; lengthScaleVal.textContent = lastLS; }
+
+        // Add slider listeners
+        [lengthScaleInput].forEach(el => {
+            el.oninput = () => {
+                document.getElementById(el.id + 'Val').textContent = el.value;
+            };
+        });
+
+        connectWS();
+        fetchModels();
+        updateHealth();
+
+    </script>
+</body>
+</html>
