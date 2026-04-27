@@ -1,0 +1,8 @@
+# Shared Engine Build Artifacts
+build/
+bin/
+
+# Large runtime data (downloaded by setup.sh)
+espeak-ng-data/
+onnxruntime-linux-x64-gpu-1.17.1-patched.zip
+espeak_bootstrap.tar.bz2

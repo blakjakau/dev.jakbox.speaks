@@ -2,18 +2,24 @@
 piper-service
 dist/
 bin/
+build/
+fake_bin/
+provider.cfg
+tts-override.json
+lib/
+include/
 
-# Models are huge and handled separately (downloaded or local)
+# Models and Data are huge and handled separately (downloaded or local)
 models/
 *.onnx
 *.onnx.json
+piper/espeak-ng-data/
 
-# C++ Build remnants
+# Build remnants
 build_deps/
 *.o
 *.a
 *.so*
-!lib/*.so*
 
 # IDE/System
 .DS_Store
