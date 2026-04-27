@@ -137,6 +137,8 @@ let aiChunkDuration = 0;
 let progressAnimId = null;
 let currentVisualPercent = 0;
 let progressLogThrottler = 0;
+let nextScheduledStartTime = 0;
+let isAudioDecoding = false;
 
 const userProfileContainer = document.getElementById('userProfileContainer');
 const userAvatarBtn = document.getElementById('userAvatarBtn');
@@ -687,6 +689,21 @@ menuLogoutBtn.onclick = () => {
     document.cookie = "speax_avatar=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
     window.location.reload();
 };
+
+const testAudioBtn = document.getElementById('testAudioBtn');
+if (testAudioBtn) {
+    testAudioBtn.onclick = () => {
+        console.log("Test Audio Button Clicked. Client status:", serverClient ? "Initialized" : "NULL", serverClient?.isOpen() ? "Open" : "Closed");
+        if (serverClient && serverClient.isOpen()) {
+            serverClient.send("[TEST_AUDIO]");
+            showToast("Playing test audio (12s)... Check server logs.");
+        } else {
+            const reason = !serverClient ? "Not Initialized" : "Connection Closed";
+            showToast("Test Failed: " + reason);
+        }
+    };
+}
+
 
 loginBtn.onclick = () => window.location.href = '/auth/login';
 
@@ -1243,16 +1260,20 @@ pauseBtn.onclick = () => {
 };
 
 async function playNextAudio() {
-    if (audioQueue.length === 0 || isPaused) {
-        if (isPlayingAudio && !isPaused && speaxWebSocket && speaxWebSocket.readyState === WebSocket.OPEN) {
-            speaxWebSocket.send("[PLAYBACK_COMPLETE]");
+    if (isAudioDecoding || isPaused) return;
+
+    if (audioQueue.length === 0) {
+        if (isPlayingAudio && !isPaused && serverClient && serverClient.isOpen()) {
+            serverClient.send("[PLAYBACK_COMPLETE]");
         }
         isPlayingAudio = false;
         progressBar.style.width = '0%';
         status.innerText = isMuted ? "Status: Connected - Muted" : "Status: Connected - Listening...";
+        nextScheduledStartTime = 0;
         return;
     }
 
+    isAudioDecoding = true;
     isPlayingAudio = true;
     status.innerText = "Status: Playing Audio...";
 
@@ -1261,38 +1282,51 @@ async function playNextAudio() {
 
     try {
         const blob = audioQueue.shift();
-        const estSecs = Math.max(0, blob.size - 44) / 32000;
         const arrayBuffer = await blob.arrayBuffer();
         const audioBuffer = await outContext.decodeAudioData(arrayBuffer);
 
-        // Correct our rough estimate with the precise decoded duration
-        console.log(`[Audio Play] Decoded exact duration: ${audioBuffer.duration.toFixed(2)}s (Estimate was ${estSecs.toFixed(2)}s).`);
-        aiAudioTotalSecs = aiAudioTotalSecs - estSecs + audioBuffer.duration;
+        const source = outContext.createBufferSource();
+        currentAudioSource = source;
+        source.buffer = audioBuffer;
 
         if (!audioAnalyser) {
             audioAnalyser = outContext.createAnalyser();
             audioAnalyser.fftSize = 256;
             audioAnalyser.connect(outContext.destination);
         }
-
-        const source = outContext.createBufferSource();
-        currentAudioSource = source;
-        source.buffer = audioBuffer;
         source.connect(audioAnalyser);
+
+        const now = outContext.currentTime;
+        if (nextScheduledStartTime < now) {
+            nextScheduledStartTime = now + 0.05; // 50ms initial cushion
+        }
+
+        const playAt = nextScheduledStartTime;
+        source.start(playAt);
+        nextScheduledStartTime += audioBuffer.duration;
+
         source.onended = () => {
-            currentAudioSource = null;
-            aiAudioPlayedSecs += aiChunkDuration;
-            playNextAudio();
-        }; // trigger the next chunk gaplessly!
-        source.start(0);
+            // Update bookkeeping for progress bar
+            aiAudioPlayedSecs += audioBuffer.duration;
+            // Trigger next chunk if queue exists and we aren't already decoding
+            if (audioQueue.length > 0) playNextAudio();
+        };
 
-        aiChunkStartContextTime = outContext.currentTime;
+        // For progress bar tracking of the "current" audible chunk
+        aiChunkStartContextTime = playAt;
         aiChunkDuration = audioBuffer.duration;
-        if (!progressAnimId) updateProgressBar();
 
+        if (!progressAnimId) updateProgressBar();
         if (!visualizerId) renderVisualizer();
+
+        isAudioDecoding = false;
+        // Pre-schedule the next one immediately if possible
+        if (audioQueue.length > 0) playNextAudio();
+
     } catch (err) {
         console.error("Error decoding TTS audio:", err);
+        isAudioDecoding = false;
+        isPlayingAudio = false;
         playNextAudio();
     }
 }

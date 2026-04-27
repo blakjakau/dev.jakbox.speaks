@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,11 +13,14 @@ import (
 )
 
 type OverrideRule struct {
-	Description string `json:"description"`
-	Type        string `json:"type"` // "regex" or "string"
-	Match       string `json:"match"`
-	Replace     string `json:"replace"`
+	Description string            `json:"description"`
+	Type        string            `json:"type"` // "regex", "string", or "map"
+	Match       string            `json:"match"`
+	Replace     string            `json:"replace"`
+	Map         map[string]string `json:"map"`
+	PreSplit    bool              `json:"pre_split"`
 	regex       *regexp.Regexp
+	replacer    *strings.Replacer
 }
 
 type TTSOverrides struct {
@@ -26,7 +30,8 @@ type TTSOverrides struct {
 }
 
 var (
-	currentOverrides    []OverrideRule
+	preSplitOverrides   []OverrideRule
+	postSplitOverrides  []OverrideRule
 	overridesMutex      sync.RWMutex
 	overridesFile       = "tts-override.json"
 	lastOverridesUpdate time.Time
@@ -62,40 +67,58 @@ func loadOverrides() {
 		return
 	}
 
-	var rules []OverrideRule
-	// Add global rules first
-	for _, r := range tts.Global {
+	var preRules []OverrideRule
+	var postRules []OverrideRule
+
+	processRule := func(r OverrideRule, category string) {
 		if r.Type == "regex" {
 			re, err := regexp.Compile(r.Match)
 			if err != nil {
-				log.Printf("[Overrides] Invalid regex in global rule '%s': %v", r.Description, err)
-				continue
+				log.Printf("[Overrides] Invalid regex in %s rule '%s': %v", category, r.Description, err)
+				return
 			}
 			r.regex = re
+		} else if r.Type == "map" {
+			if len(r.Map) > 0 {
+				var pairs []string
+				for k, v := range r.Map {
+					pairs = append(pairs, k, v)
+				}
+				r.replacer = strings.NewReplacer(pairs...)
+			}
 		}
-		rules = append(rules, r)
-		log.Printf("[Overrides] Added global rule: [%s] %s -> %s", r.Type, r.Match, r.Replace)
+
+		if r.PreSplit {
+			preRules = append(preRules, r)
+		} else {
+			postRules = append(postRules, r)
+		}
+
+		details := ""
+		if r.Type == "map" {
+			details = fmt.Sprintf("%d keys", len(r.Map))
+		} else {
+			details = fmt.Sprintf("%s -> %s", r.Match, r.Replace)
+		}
+		log.Printf("[Overrides] Added %s rule (Pre=%v): [%s] %s", category, r.PreSplit, r.Type, details)
+	}
+
+	// Add global rules first
+	for _, r := range tts.Global {
+		processRule(r, "global")
 	}
 
 	// Add Kokoro specific rules
 	for _, r := range tts.Kokoro {
-		if r.Type == "regex" {
-			re, err := regexp.Compile(r.Match)
-			if err != nil {
-				log.Printf("[Overrides] Invalid regex in kokoro rule '%s': %v", r.Description, err)
-				continue
-			}
-			r.regex = re
-		}
-		rules = append(rules, r)
-		log.Printf("[Overrides] Added kokoro rule: [%s] %s -> %s", r.Type, r.Match, r.Replace)
+		processRule(r, "kokoro")
 	}
 
 	overridesMutex.Lock()
-	currentOverrides = rules
+	preSplitOverrides = preRules
+	postSplitOverrides = postRules
 	overridesMutex.Unlock()
 
-	log.Printf("[Overrides] Loaded %d total rules from %s", len(rules), absPath)
+	log.Printf("[Overrides] Loaded %d rules (Pre: %d, Post: %d) from %s", len(preRules)+len(postRules), len(preRules), len(postRules), absPath)
 }
 
 func watchOverrides() {
@@ -116,21 +139,96 @@ func watchOverrides() {
 	}
 }
 
-func applyOverrides(text string) string {
+func ApplyPreSplit(text string) (string, *strings.Replacer, *strings.Replacer) {
 	overridesMutex.RLock()
 	defer overridesMutex.RUnlock()
 
-	original := text
-	for _, r := range currentOverrides {
+	if len(preSplitOverrides) == 0 {
+		return text, strings.NewReplacer(), strings.NewReplacer()
+	}
+
+	marked := text
+	var inferencePairs []string
+	var displayPairs []string
+
+	for i, r := range preSplitOverrides {
+		found := false
+		matchCount := 0
+
 		if r.Type == "regex" && r.regex != nil {
-			text = r.regex.ReplaceAllString(text, r.Replace)
+			marked = r.regex.ReplaceAllStringFunc(marked, func(match string) string {
+				found = true
+				marker := fmt.Sprintf("\x00R%d_%d\x01", i, matchCount)
+				matchCount++
+				inferencePairs = append(inferencePairs, marker, r.ReplaceAll(match))
+				displayPairs = append(displayPairs, marker, match)
+				return marker
+			})
 		} else if r.Type == "string" {
+			if strings.Contains(marked, r.Match) {
+				found = true
+				marker := fmt.Sprintf("\x00R%d\x01", i)
+				marked = strings.ReplaceAll(marked, r.Match, marker)
+				inferencePairs = append(inferencePairs, marker, r.Replace)
+				displayPairs = append(displayPairs, marker, r.Match)
+			}
+		} else if r.Type == "map" && r.replacer != nil {
+			// Maps are a bit tougher with markers because they handle multiple keys at once.
+			// For simplicity and correctness with markers, we'll treat map keys as individual string rules here
+			// if we want perfect marker tracking, OR we just apply them as-is if they are known safe.
+			// Given it's pre-split, let's treat them as individual string replacements for marker safety.
+			for k, v := range r.Map {
+				if strings.Contains(marked, k) {
+					found = true
+					subMarker := fmt.Sprintf("\x00M%d_%s\x01", i, k)
+					marked = strings.ReplaceAll(marked, k, subMarker)
+					inferencePairs = append(inferencePairs, subMarker, v)
+					displayPairs = append(displayPairs, subMarker, k)
+				}
+			}
+		}
+
+		if found {
+			log.Printf("[Overrides:Pre] Marked rule: %s", r.Description)
+		}
+	}
+
+	return marked, strings.NewReplacer(inferencePairs...), strings.NewReplacer(displayPairs...)
+}
+
+func (r *OverrideRule) ReplaceAll(match string) string {
+	if r.Type == "regex" && r.regex != nil {
+		return r.regex.ReplaceAllString(match, r.Replace)
+	}
+	return r.Replace
+}
+
+func ApplyPostSplit(text string) string {
+	overridesMutex.RLock()
+	defer overridesMutex.RUnlock()
+
+	if len(postSplitOverrides) == 0 {
+		return text
+	}
+
+	original := text
+	for _, r := range postSplitOverrides {
+		switch r.Type {
+		case "regex":
+			if r.regex != nil {
+				text = r.regex.ReplaceAllString(text, r.Replace)
+			}
+		case "string":
 			text = strings.ReplaceAll(text, r.Match, r.Replace)
+		case "map":
+			if r.replacer != nil {
+				text = r.replacer.Replace(text)
+			}
 		}
 	}
 
 	if text != original {
-		log.Printf("[Overrides] Text modified:\n  IN:  %s\n  OUT: %s", original, text)
+		log.Printf("[Overrides:Post] Text modified:\n  IN:  %s\n  OUT: %s", original, text)
 	}
 
 	return text

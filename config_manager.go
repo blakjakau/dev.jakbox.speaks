@@ -24,10 +24,15 @@ type AdminConfigOverride struct {
 	MaxTokensGemini      *int                       `json:"MaxTokensGemini,omitempty"`
 	MaxTokensOllama      *int                       `json:"MaxTokensOllama,omitempty"`
 	MaxTokensLlamaCpp    *int                       `json:"MaxTokensLlamaCpp,omitempty"`
-	PassiveWindowSeconds *int                       `json:"PassiveWindowSeconds,omitempty"`
-	WakeWords            *[]string                  `json:"WakeWords,omitempty"`
-	LlamaCppURLs         *[]string                  `json:"LlamaCppURLs,omitempty"`
-	ModelLimits          *map[string]ModelRateLimit `json:"ModelLimits,omitempty"`
+	PassiveWindowSeconds   *int                       `json:"PassiveWindowSeconds,omitempty"`
+	WakeWords              *[]string                  `json:"WakeWords,omitempty"`
+	LlamaCppURLs           *[]string                  `json:"LlamaCppURLs,omitempty"`
+	LlamaCppModels         *[]string                  `json:"LlamaCppModels,omitempty"`
+	LlamaCppModel          *string                    `json:"LlamaCppModel,omitempty"`
+	LlamaCppIdleCache      *bool                      `json:"LlamaCppIdleCache,omitempty"`
+	LlamaCppSlotManagement *bool                      `json:"LlamaCppSlotManagement,omitempty"`
+	LlamaCppSlotsCount     *int                       `json:"LlamaCppSlotsCount,omitempty"`
+	ModelLimits            *map[string]ModelRateLimit `json:"ModelLimits,omitempty"`
 }
 
 type Config struct {
@@ -57,11 +62,14 @@ type Config struct {
 	OllamaModels         []string                       `json:"OllamaModels"`
 	LlamaCppModels       []string                       `json:"LlamaCppModels"`
 	LlamaCppURLs         []string                       `json:"LlamaCppURLs"`
-	LlamaCppModel        string                         `json:"LlamaCppModel"`
-	STTMinBuffer         float64                        `json:"STTMinBuffer"`
-	STTMaxBuffer         float64                        `json:"STTMaxBuffer"`
-	STTEnergyThreshold   float64                        `json:"STTEnergyThreshold"`
-	VerboseLogging       bool                           `json:"VerboseLogging"`
+	LlamaCppModel           string                         `json:"LlamaCppModel"`
+	LlamaCppIdleCache       bool                           `json:"LlamaCppIdleCache"`
+	LlamaCppSlotManagement  bool                           `json:"LlamaCppSlotManagement"`
+	LlamaCppSlotsCount     int                            `json:"LlamaCppSlotsCount"`
+	STTMinBuffer           float64                        `json:"STTMinBuffer"`
+	STTMaxBuffer           float64                        `json:"STTMaxBuffer"`
+	STTEnergyThreshold     float64                        `json:"STTEnergyThreshold"`
+	VerboseLogging         bool                           `json:"VerboseLogging"`
 }
 
 type ModelRateLimit struct {

@@ -8,6 +8,9 @@ kokoro-service
 result.bin
 temp_refine.bin
 mixes.json
+provider.cfg
+feature_config.json
+tts-override.json
 
 # Dependencies
 lib/

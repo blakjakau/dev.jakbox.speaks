@@ -11,8 +11,7 @@
 		"functional_mode": "architectural",
 		"voice": [
 			{ "type": "piper", "name": "jarvis-medium" },
-			{ "type": "kokoro", "name": "bm_jarvis" },
-			{ "type": "pocket", "name":"Jarvis" }
+			{ "type": "kokoro", "name": "bm_lewis" }
 		],
 		"voice_file": "jarvis-medium.onnx",
 		"voice_file_mobile": "jarvis-medium.onnx",
@@ -46,7 +45,7 @@
 		"voice_file": "alyx-medium.onnx",
 		"voice_file_mobile": "alyx-medium.onnx",
 		
-		"voice_length_scale": 0.85,
+		"voice_length_scale": 0.9,
 		"voice_noise_scale": 0.9,
 		"voice_noise_w": 0.9,
 

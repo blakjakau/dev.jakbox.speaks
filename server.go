@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -459,6 +460,72 @@ func (s *ClientSession) GetMaxTokensLlamaCpp() int {
 		}
 	}
 	return config.MaxTokensLlamaCpp
+}
+
+func (s *ClientSession) GetLlamaCppURLs() []string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.LlamaCppURLs != nil {
+			return *override.LlamaCppURLs
+		}
+	}
+	return config.LlamaCppURLs
+}
+
+func (s *ClientSession) GetLlamaCppModels() []string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.LlamaCppModels != nil {
+			return *override.LlamaCppModels
+		}
+	}
+	return config.LlamaCppModels
+}
+
+func (s *ClientSession) GetLlamaCppModel() string {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.LlamaCppModel != nil {
+			return *override.LlamaCppModel
+		}
+	}
+	return config.LlamaCppModel
+}
+
+func (s *ClientSession) GetLlamaCppIdleCache() bool {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.LlamaCppIdleCache != nil {
+			return *override.LlamaCppIdleCache
+		}
+	}
+	return config.LlamaCppIdleCache
+}
+
+func (s *ClientSession) GetLlamaCppSlotManagement() bool {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.LlamaCppSlotManagement != nil {
+			return *override.LlamaCppSlotManagement
+		}
+	}
+	return config.LlamaCppSlotManagement
+}
+
+func (s *ClientSession) GetLlamaCppSlotsCount() int {
+	configMutex.RLock()
+	defer configMutex.RUnlock()
+	if override, ok := config.Admins[s.ClientID]; ok {
+		if override.LlamaCppSlotsCount != nil {
+			return *override.LlamaCppSlotsCount
+		}
+	}
+	return config.LlamaCppSlotsCount
 }
 
 func (s *ClientSession) GetPassiveWindowSeconds() int {
@@ -1683,7 +1750,7 @@ func (s *ClientSession) resolveFallback(currentModel string) (string, string) {
 			return "ollama", fallback
 		}
 	}
-	for _, m := range config.LlamaCppModels {
+	for _, m := range s.GetLlamaCppModels() {
 		if m == fallback {
 			return "llamacpp", fallback
 		}
@@ -2175,6 +2242,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		// Handle incoming text (TTS Request)
 		if messageType == websocket.TextMessage {
 			text := string(p)
+			log.Printf("[WS] Received from %s: %s", session.ClientID, text)
 
 			if text == "[CANCEL]" {
 				session.BufferMutex.Lock()
@@ -2375,6 +2443,14 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			if text == "[TEST_AUDIO]" {
+				log.Printf("[TEST] Triggering audio indicator loop for 12 seconds")
+				cancel := startThinkingAudio(context.Background(), session, ws)
+				time.AfterFunc(12*time.Second, cancel)
+				continue
+			}
+
+
 			if strings.HasPrefix(text, "[NEW_THREAD]:") {
 				name := strings.TrimPrefix(text, "[NEW_THREAD]:")
 				if name == "" {
@@ -2503,7 +2579,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 						} else if settings.Provider == "ollama" {
 							settings.Model = config.OllamaModel
 						} else if settings.Provider == "llamacpp" {
-							settings.Model = config.LlamaCppModel
+							settings.Model = session.GetLlamaCppModel()
 						}
 						configMutex.RUnlock()
 					}
@@ -3404,12 +3480,16 @@ func getOllamaModelsInternal(isAdmin bool) []ModelData {
 
 // selectFallbackModel is deprecated. Use (s *ClientSession).resolveFallback and the traversal logic in streamLLMAndTTSInternal.
 
-func getLlamaCppModelsInternal(isAdmin bool) []ModelData {
+func getLlamaCppModelsInternal(isAdmin bool, clientID string) []ModelData {
 	var out []ModelData
 
 	configMutex.RLock()
 	chatURLs := config.LlamaCppURLs
-
+	if override, ok := config.Admins[clientID]; ok {
+		if override.LlamaCppURLs != nil {
+			chatURLs = *override.LlamaCppURLs
+		}
+	}
 	configMutex.RUnlock()
 
 	if len(chatURLs) == 0 {
@@ -4272,8 +4352,10 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	geminiClient := &http.Client{Timeout: 60 * time.Second}
 	log.Printf("[Gemini] Sending request to: %s", reqURL)
 	llmStartTime := time.Now()
+	stopThinking := startThinkingAudio(ctx, session, ws)
 	resp, err := geminiClient.Do(req)
 	if err != nil {
+		stopThinking()
 		log.Printf("[Gemini] HTTP request failed: %v", err)
 		return err
 	}
@@ -4281,6 +4363,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	log.Printf("[Gemini] HTTP Response Status: %s", resp.Status)
 
 	if resp.StatusCode >= 400 {
+		stopThinking()
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		statusText := resp.Status
 		if len(bodyBytes) > 0 {
@@ -4473,6 +4556,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	var sessionTokens int64
 
 	firstChunkSent := false
+	gotFirstToken := false
 	flushPendingText := func(text string) {
 		if text == "" {
 			return
@@ -4535,6 +4619,11 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {
+			if !gotFirstToken {
+				gotFirstToken = true
+				stopThinking()
+				log.Printf("[Gemini] Time to first token: %v", time.Since(llmStartTime))
+			}
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "" {
 				continue
@@ -4611,13 +4700,7 @@ func streamGeminiAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 		// Only perform maintenance if the turn completed naturally
 		if ctx.Err() == nil {
-			if len(t.History) > 30 {
-				toSummarize := make([]ChatMessage, 10)
-				copy(toSummarize, t.History[:10])
-				t.Archive = append(t.Archive, toSummarize...)
-				t.History = t.History[10:]
-				go generateSummaryAsync(toSummarize, t.ID, session)
-			}
+			triggerMaintenance(session, t)
 		}
 		session.Mutex.Unlock()
 
@@ -4765,9 +4848,11 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
 	llmStartTime := time.Now()
+	stopThinking := startThinkingAudio(ctx, session, ws)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		stopThinking()
 		log.Printf("[Ollama] HTTP request failed: %v", err)
 		return err
 	}
@@ -4775,6 +4860,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	log.Printf("[Ollama] HTTP Response Status: %s", resp.Status)
 
 	if resp.StatusCode >= 400 {
+		stopThinking()
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		statusText := resp.Status
 		err := fmt.Errorf("ollama API error: %s - %s", statusText, string(bodyBytes))
@@ -4864,6 +4950,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 	var sentence strings.Builder
 	var fullResponse strings.Builder
 	ttsChan := make(chan string, 50)
+	gotFirstToken := false
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -5042,6 +5129,12 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 			}
 			break
 		}
+		if !gotFirstToken {
+			gotFirstToken = true
+			stopThinking()
+			log.Printf("[Ollama] Time to first token: %v", time.Since(llmStartTime))
+		}
+
 		// log.Printf("[Ollama] Chunk: done=%v content=%q tool_calls=%d", result.Done, result.Message.Content, len(result.Message.ToolCalls))
 
 		if len(result.Message.ToolCalls) > 0 {
@@ -5087,13 +5180,7 @@ func streamOllamaAndTTS(ctx context.Context, prompt string, ws *websocket.Conn, 
 
 		// Only perform maintenance if the turn completed naturally
 		if ctx.Err() == nil {
-			if len(t.History) > 30 {
-				toSummarize := make([]ChatMessage, 10)
-				copy(toSummarize, t.History[:10])
-				t.Archive = append(t.Archive, toSummarize...)
-				t.History = t.History[10:]
-				go generateSummaryAsync(toSummarize, t.ID, session)
-			}
+			triggerMaintenance(session, t)
 		}
 		session.Mutex.Unlock()
 		saveSession(session)
@@ -5247,7 +5334,7 @@ func streamLlamaCppAndTTS(ctx context.Context, prompt string, ws *websocket.Conn
 	saveCalculatedContentWindow(session, body)
 
 	configMutex.RLock()
-	llamaCppURLs := config.LlamaCppURLs
+	llamaCppURLs := session.GetLlamaCppURLs()
 	configMutex.RUnlock()
 
 	url := getNextURL(llamaCppURLs, &llamaCppIndex)
@@ -5260,15 +5347,18 @@ func streamLlamaCppAndTTS(ctx context.Context, prompt string, ws *websocket.Conn
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
 	llmStartTime := time.Now()
+	stopThinking := startThinkingAudio(ctx, session, ws)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		stopThinking()
 		log.Printf("[LlamaCpp] HTTP request failed: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
+		stopThinking()
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("llamacpp API error: %s - %s", resp.Status, string(bodyBytes))
 	}
@@ -5350,6 +5440,7 @@ func streamLlamaCppAndTTS(ctx context.Context, prompt string, ws *websocket.Conn
 	scanner := bufio.NewScanner(resp.Body)
 	var sessionPromptTokens, sessionRespTokens, sessionTokens int64
 	firstChunkSent := false
+	gotFirstToken := false
 
 	type toolBuffer struct {
 		Name string
@@ -5418,6 +5509,11 @@ func streamLlamaCppAndTTS(ctx context.Context, prompt string, ws *websocket.Conn
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {
+			if !gotFirstToken {
+				gotFirstToken = true
+				stopThinking()
+				log.Printf("[LlamaCpp] Time to first token: %v", time.Since(llmStartTime))
+			}
 			data := strings.TrimPrefix(line, "data: ")
 			if data == "[DONE]" {
 				break
@@ -5502,6 +5598,10 @@ func streamLlamaCppAndTTS(ctx context.Context, prompt string, ws *websocket.Conn
 				session.appendMessage("assistant", final, t)
 			}
 		}
+
+		if ctx.Err() == nil {
+			triggerMaintenance(session, t)
+		}
 		session.Mutex.Unlock()
 
 		if sessionTokens > 0 {
@@ -5561,6 +5661,18 @@ func rebuildSummaryAsync(session *ClientSession) {
 	generateSummaryAsync(archiveCopy, threadID, session)
 }
 
+func triggerMaintenance(session *ClientSession, t *Thread) {
+	// Only perform maintenance if history exceeds 30 turns to keep the context window focused.
+	if len(t.History) > 30 {
+		var toCopy = len(t.History) - 15
+		toSummarize := make([]ChatMessage, toCopy)
+		copy(toSummarize, t.History[:toCopy])
+		t.Archive = append(t.Archive, toSummarize...)
+		t.History = t.History[toCopy:]
+		go generateSummaryAsync(toSummarize, t.ID, session)
+	}
+}
+
 func generateSummaryAsync(messages []ChatMessage, threadID string, session *ClientSession) {
 	var transcript strings.Builder
 	for _, msg := range messages {
@@ -5595,46 +5707,93 @@ func generateSummaryAsync(messages []ChatMessage, threadID string, session *Clie
 	configMutex.RLock()
 	ollamaModelConfig := config.OllamaModel
 	ollamaURLs := config.OllamaURLs
+	cppURLs := session.GetLlamaCppURLs()
 	configMutex.RUnlock()
 
-	// 1. Always attempt local summarization first to save tokens (Fast fail after 10s)
-	localPayload := map[string]interface{}{"model": ollamaModelConfig, "prompt": prompt, "stream": false}
-	localBody, _ := json.Marshal(localPayload)
+	var targetURL string
+	var targetModel string
+	var payloadType string // "ollama" or "openai"
+
+	if provider == "ollama" {
+		targetURL = getNextURL(ollamaURLs, &ollamaIndex)
+		targetModel = model
+		payloadType = "ollama"
+	} else if provider == "llamacpp" {
+		targetURL = getNextURL(cppURLs, &llamaCppIndex)
+		targetModel = model
+		payloadType = "openai"
+	} else {
+		// Fallback for remote providers (Gemini): use lightweight local model
+		targetURL = getNextURL(ollamaURLs, &ollamaIndex)
+		targetModel = ollamaModelConfig
+		payloadType = "ollama"
+	}
+
+	// 1. Always attempt local summarization first
+	var localBody []byte
+	if payloadType == "openai" {
+		payload := map[string]interface{}{
+			"model":    targetModel,
+			"messages": []map[string]string{{"role": "user", "content": prompt}},
+			"stream":   false,
+		}
+		localBody, _ = json.Marshal(payload)
+	} else {
+		payload := map[string]interface{}{
+			"model":  targetModel,
+			"prompt": prompt,
+			"stream": false,
+		}
+		localBody, _ = json.Marshal(payload)
+	}
 
 	client := &http.Client{Timeout: 60 * time.Second}
-	url := getNextURL(ollamaURLs, &ollamaIndex)
-	resp, err := client.Post(url, "application/json", bytes.NewReader(localBody))
+	log.Printf("[Summarizer] Attempting local summary with %s (%s) via %s", provider, targetModel, targetURL)
+
+	resp, err := client.Post(targetURL, "application/json", bytes.NewReader(localBody))
 	if err != nil {
-		log.Printf("Local Ollama summary failed (Network/Timeout): %v", err)
+		log.Printf("Local summarization failed (Network/Timeout): %v", err)
 	} else {
 		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
-			var result struct {
-				Response        string `json:"response"`
-				PromptEvalCount int64  `json:"prompt_eval_count"`
-				EvalCount       int64  `json:"eval_count"`
-			}
-			if json.NewDecoder(resp.Body).Decode(&result) == nil {
-				newSummary = strings.TrimSpace(result.Response)
-				localSuccess = true
-				trackTokens(session, "ollama", result.PromptEvalCount+result.EvalCount)
-				log.Println("--- Context Memory Summarized locally via Ollama (Saved API Tokens!) ---")
+			if payloadType == "openai" {
+				var result struct {
+					Choices []struct {
+						Message struct {
+							Content string `json:"content"`
+						} `json:"message"`
+					} `json:"choices"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result.Choices) > 0 {
+					newSummary = strings.TrimSpace(result.Choices[0].Message.Content)
+					localSuccess = true
+					log.Printf("--- Context Memory Summarized via Llama.cpp (%s) ---", targetModel)
+				}
+			} else {
+				var result struct {
+					Response        string `json:"response"`
+					PromptEvalCount int64  `json:"prompt_eval_count"`
+					EvalCount       int64  `json:"eval_count"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&result) == nil {
+					newSummary = strings.TrimSpace(result.Response)
+					localSuccess = true
+					trackTokens(session, "ollama", result.PromptEvalCount+result.EvalCount)
+					log.Printf("--- Context Memory Summarized via Ollama (%s) ---", targetModel)
+				}
 			}
 		} else {
 			buf := new(bytes.Buffer)
 			buf.ReadFrom(resp.Body)
-			log.Printf("Local Ollama summary failed (HTTP %d): %s", resp.StatusCode, buf.String())
+			log.Printf("Local summarization failed (HTTP %d): %s", resp.StatusCode, buf.String())
 		}
 	}
 
-	// 2. Fallback to Gemini if Ollama is offline or failed
+	// 2. Fallback to Gemini ONLY if local failed AND the user is actually using Gemini
 	if !localSuccess && provider == "gemini" && apiKey != "" {
-		type Part struct {
-			Text string `json:"text"`
-		}
 		payload := map[string]interface{}{
 			"contents": []map[string]interface{}{
-				{"role": "user", "parts": []Part{{Text: prompt}}},
+				{"role": "user", "parts": []map[string]string{{"text": prompt}}},
 			},
 		}
 		body, _ := json.Marshal(payload)
@@ -5925,6 +6084,99 @@ func queryTTS(text string, voice string, userName string, personaName string, ph
 	return audioBytes, nil
 }
 
+func startThinkingAudio(ctx context.Context, session *ClientSession, ws *websocket.Conn) context.CancelFunc {
+	audioCtx, cancel := context.WithCancel(ctx)
+
+	go func() {
+		defer cancel()
+
+		const sampleRate = 16000
+		const rumbleFreq1 = 50.0  // 1st
+		const rumbleFreq2 = 100.0 // 2nd
+		const rumbleFreq3 = 150.0 // 3rd
+		const rumbleFreq4 = 200.0 // 4th
+		const rumbleFreq5 = 250.0 // 5th
+		const pulseFreq = 0.2    // 5 second cycle
+		const amplitude = 3000.0 // Final volume reduction
+		const chunkSize = 8000   // 500ms at 16kHz
+		const tickerInterval = 500 * time.Millisecond // Perfect maintenance (500ms audio every 500ms)
+
+		var sampleCount int64
+
+		// Helper to generate a specific number of samples wrapped in a WAV header
+		generateWav := func(count int, isFadeOut bool) []byte {
+			pcm := make([]byte, count*2)
+			for i := 0; i < count; i++ {
+				t := float64(sampleCount) / sampleRate
+				
+				// LFO: 0.7 + 0.1*sin(t) => Range [0.6, 0.8]. Flatter pulse (less extreme depth).
+				lfo := 0.7 + 0.1*math.Sin(2*math.Pi*pulseFreq*t)
+				
+				// 5-harmonic series in phase (50, 100, 150, 200, 250Hz)
+				s1 := math.Sin(2*math.Pi*rumbleFreq1*t)
+				s2 := math.Sin(2*math.Pi*rumbleFreq2*t)
+				s3 := math.Sin(2*math.Pi*rumbleFreq3*t)
+				s4 := math.Sin(2*math.Pi*rumbleFreq4*t)
+				s5 := math.Sin(2*math.Pi*rumbleFreq5*t)
+				
+				// Sum and normalize (1/5 weight each)
+				val := (s1 + s2 + s3 + s4 + s5) / 5.0 * amplitude * lfo
+				
+				// Envelope for Fades
+				envelope := 1.0
+				// Fade-in (0.25s = 4000 samples) at the absolute start
+				if sampleCount < 4000 {
+					envelope = float64(sampleCount) / 4000.0
+				}
+				// Fade-out override for termination chunk
+				if isFadeOut {
+					envelope = 1.0 - (float64(i) / float64(count))
+				}
+				
+				sample := int16(val * envelope)
+				binary.LittleEndian.PutUint16(pcm[i*2:i*2+2], uint16(sample))
+				sampleCount++
+			}
+			return stt.AddWavHeader(pcm, sampleRate)
+		}
+
+		target := ws
+		if target == nil || session.isToolConn(target) {
+			target = getLastActiveUIConn(session)
+		}
+
+		// Initial burst: 2.0s (32,000 samples) to build rock-solid buffer
+		if target != nil {
+			safeWrite(target, session, websocket.BinaryMessage, generateWav(32000, false))
+		}
+
+		tick := time.NewTicker(tickerInterval)
+		defer tick.Stop()
+
+		for {
+			select {
+			case <-audioCtx.Done():
+				// Final 0.25s (4,000 samples) fade-out tail
+				if target != nil {
+					safeWrite(target, session, websocket.BinaryMessage, generateWav(4000, true))
+				}
+				return
+			case <-tick.C:
+				pcm := generateWav(chunkSize, false)
+				if target == nil || session.isToolConn(target) {
+					target = getLastActiveUIConn(session)
+				}
+				if target != nil {
+					safeWrite(target, session, websocket.BinaryMessage, pcm)
+				}
+			}
+		}
+	}()
+
+	return cancel
+}
+
+
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	b := make([]byte, 16)
 	rand.Read(b)
@@ -6095,7 +6347,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	} else if provider == "ollama" {
 		out = getOllamaModelsInternal(isAdmin)
 	} else if provider == "llamacpp" {
-		out = getLlamaCppModelsInternal(isAdmin)
+		out = getLlamaCppModelsInternal(isAdmin, clientID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

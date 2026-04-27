@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/gorilla/websocket"
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
@@ -177,6 +178,7 @@ func reloadEngines() {
 
 func main() {
 	provider := flag.String("provider", "cuda", "Hardware acceleration provider (cuda, vulkan, openvino, cpu)")
+	enableSandbox := flag.Bool("sandbox", false, "Enable the sandbox TTS mixer engine (off by default)")
 	flag.Parse()
 
 	log.Printf("Initializing Sherpa-ONNX Kokoro TTS Backend with provider: %s", *provider)
@@ -215,25 +217,29 @@ func main() {
 	
 	log.Println("Sherpa-ONNX TTS initialized successfully.")
 
-	// Pre-warm Sandbox Engine
-	// Create initial sandbox file from master
-	masterData, err := ioutil.ReadFile("models/kokoro-multi-lang-v1_0/voices.bin")
-	if err == nil {
-		ioutil.WriteFile(sandboxPath, masterData, 0644)
-	}
-	sbCfg := globalConfig
-	sbCfg.Model.Kokoro.Voices = sandboxPath
-	numCores := int(runtime.NumCPU() / 2)
-	if numCores < 1 { numCores = 1 }
-	sbCfg.Model.NumThreads = numCores
-	sbCfg.Model.Provider = "cpu" // Force CPU for sandbox to save VRAM
-	
-	sTts := sherpa.NewOfflineTts(&sbCfg)
-	if sTts != nil {
-		sandboxTts = sTts
-		log.Println("Sandbox TTS Engine pre-warmed (CPU).")
+	// Pre-warm Sandbox Engine if enabled
+	if *enableSandbox {
+		// Create initial sandbox file from master
+		masterData, err := ioutil.ReadFile("models/kokoro-multi-lang-v1_0/voices.bin")
+		if err == nil {
+			ioutil.WriteFile(sandboxPath, masterData, 0644)
+		}
+		sbCfg := globalConfig
+		sbCfg.Model.Kokoro.Voices = sandboxPath
+		numCores := int(runtime.NumCPU() / 2)
+		if numCores < 1 { numCores = 1 }
+		sbCfg.Model.NumThreads = numCores
+		sbCfg.Model.Provider = "cpu" // Force CPU for sandbox to save VRAM
+		
+		sTts := sherpa.NewOfflineTts(&sbCfg)
+		if sTts != nil {
+			sandboxTts = sTts
+			log.Println("Sandbox TTS Engine pre-warmed (CPU).")
+		} else {
+			log.Println("Warning: Failed to pre-warm Sandbox TTS Engine.")
+		}
 	} else {
-		log.Println("Warning: Failed to pre-warm Sandbox TTS Engine.")
+		log.Println("Sandbox TTS Mixer is disabled (use --sandbox to enable).")
 	}
 
 	defer func() {
@@ -558,7 +564,9 @@ func handleMixRequest(conn *websocket.Conn, raw map[string]interface{}) {
 	startFrame, _ := json.Marshal(MetadataFrame{ Type: "start", SampleRate: rate })
 	conn.WriteMessage(websocket.TextMessage, startFrame)
 
-	text = applyOverrides(text)
+	marked, infRepl, _ := ApplyPreSplit(text)
+	text = infRepl.Replace(marked)
+	text = ApplyPostSplit(text)
 	audio := sandboxTts.Generate(text, 0, 1.0)
 	if audio != nil && len(audio.Samples) > 0 {
 		pcmBytes := float32ToInt16PCM(audio.Samples)
@@ -696,14 +704,17 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		conn.WriteMessage(websocket.TextMessage, startFrame)
 
-		sentences := splitIntoSentences(req.Text)
+		marked, infRepl, dispRepl := ApplyPreSplit(req.Text)
+		sentences := splitIntoSentences(marked)
 		
 		for _, s := range sentences {
 			if s == "" {
 				continue
 			}
 
-			s = applyOverrides(s)
+			displayS := strings.TrimSpace(dispRepl.Replace(s))
+			s = infRepl.Replace(s)
+			s = ApplyPostSplit(s)
 			log.Printf("Synthesizing sentence: %s [SID: %d]", s, sid)
 			
 			// Adjust speed using req.LengthScale
@@ -728,7 +739,7 @@ func streamHandler(w http.ResponseWriter, r *http.Request) {
 			// Send Metadata
 			meta, _ := json.Marshal(MetadataFrame{
 				Type:       "text",
-				Text:       s,
+				Text:       displayS,
 				AudioBytes: len(pcmBytes),
 				SampleRate: rate,
 			})
@@ -804,7 +815,9 @@ func handleMixPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	text := applyOverrides(req.Text)
+	marked, infRepl, _ := ApplyPreSplit(req.Text)
+	text := infRepl.Replace(marked)
+	text = ApplyPostSplit(text)
 	audio := sandboxTts.Generate(text, 0, 1.0)
 	if audio == nil {
 		http.Error(w, "Failed to generate preview", 500)

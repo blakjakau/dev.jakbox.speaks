@@ -2,16 +2,16 @@
 
 # Get the absolute path of the directory containing this script
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-BUILD_DIR="$SCRIPT_DIR/build"
-BUILD_LIB="$BUILD_DIR/lib"
+SHARED_ENGINE_DIR="$SCRIPT_DIR/../sherpa-engine/build"
+BUILD_LIB="$SHARED_ENGINE_DIR/lib"
 
 echo "Starting Kokoro Service..."
-echo "Build Dir: $BUILD_DIR"
+echo "Build Dir: $SCRIPT_DIR"
 
 # --- Provider Selection ---
 SELECTED_PROVIDER="cuda"
-if [ -f "$BUILD_DIR/provider.cfg" ]; then
-    SELECTED_PROVIDER=$(cat "$BUILD_DIR/provider.cfg")
+if [ -f "$SCRIPT_DIR/provider.cfg" ]; then
+    SELECTED_PROVIDER=$(cat "$SCRIPT_DIR/provider.cfg")
 fi
 echo "Target Provider: $SELECTED_PROVIDER"
 
@@ -71,6 +71,5 @@ if [ -f "$BUILD_LIB/libsherpa-onnx-c-api.so" ]; then
 fi
 
 # --- Run ---
-# Navigate to the build directory so relative paths in main.go (like ../mixes.json) resolve correctly
-cd "$BUILD_DIR"
+cd "$SCRIPT_DIR"
 exec ./kokoro-service --provider "$SELECTED_PROVIDER"
